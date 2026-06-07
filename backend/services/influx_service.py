@@ -196,6 +196,85 @@ class InfluxService:
                 })
         return result
 
+    def query_sub_items(self, building_id: str, hours: int = 24):
+        """查询分项能耗（照明/空调/插座）"""
+        if self._is_v3():
+            rows = self._query_v3(f"""
+                SELECT sub_type, SUM(value) AS total
+                FROM electricity_sub
+                WHERE time > now() - interval '{hours} hours'
+                  AND building_id = '{building_id}'
+                GROUP BY sub_type
+            """)
+            return {r["sub_type"]: round(float(r["total"]), 2) for r in rows if r.get("total")}
+
+        flux = f'''
+        from(bucket: "{self.cfg.INFLUXDB_BUCKET}")
+          |> range(start: -{hours}h)
+          |> filter(fn: (r) => r["_measurement"] == "electricity_sub")
+          |> filter(fn: (r) => r["_field"] == "value")
+          |> filter(fn: (r) => r["building_id"] == "{building_id}")
+          |> group(columns: ["sub_type"])
+          |> sum()
+        '''
+        tables = self._v2().query_api().query(flux, org=self.cfg.INFLUXDB_ORG)
+        result = {}
+        for table in tables:
+            for record in table.records:
+                sub = record.values.get("sub_type", "")
+                result[sub] = round(float(record.get_value()), 2)
+        return result
+
+    def query_historical_comparison(self, building_id: str):
+        """查询历史环比：本周 vs 上周，今日 vs 昨日"""
+        if self._is_v3():
+            rows = self._query_v3(f"""
+                SELECT
+                    date_bin(interval '1 day', time) AS day,
+                    SUM(value) AS total
+                FROM electricity_data
+                WHERE time > now() - interval '14 days'
+                  AND building_id = '{building_id}'
+                GROUP BY 1
+                ORDER BY day
+            """)
+            daily = [{"day": r["day"][:10], "total": round(float(r["total"]), 2)} for r in rows if r.get("total")]
+        else:
+            flux = f'''
+            from(bucket: "{self.cfg.INFLUXDB_BUCKET}")
+              |> range(start: -14d)
+              |> filter(fn: (r) => r["_measurement"] == "electricity_data")
+              |> filter(fn: (r) => r["_field"] == "value")
+              |> filter(fn: (r) => r["building_id"] == "{building_id}")
+              |> aggregateWindow(every: 1d, fn: sum, createEmpty: false)
+            '''
+            tables = self._v2().query_api().query(flux, org=self.cfg.INFLUXDB_ORG)
+            daily = []
+            for table in tables:
+                for record in table.records:
+                    daily.append({
+                        "day": record.get_time().strftime("%Y-%m-%d"),
+                        "total": round(float(record.get_value()), 2),
+                    })
+
+        if len(daily) < 2:
+            return {"today": 0, "yesterday": 0, "this_week": 0, "last_week": 0, "daily": daily}
+
+        today = daily[-1]["total"] if daily else 0
+        yesterday = daily[-2]["total"] if len(daily) >= 2 else 0
+        week_size = min(7, len(daily))
+        this_week = sum(d["total"] for d in daily[-week_size:])
+        last_week_start = max(0, len(daily) - week_size * 2)
+        last_week = sum(d["total"] for d in daily[last_week_start:len(daily) - week_size])
+
+        return {
+            "today": round(today, 2),
+            "yesterday": round(yesterday, 2),
+            "this_week": round(this_week, 2),
+            "last_week": round(last_week, 2),
+            "daily": daily,
+        }
+
     def close(self):
         if self._v3_client:
             self._v3_client.close()

@@ -1,9 +1,11 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Dashboard from '../views/Dashboard.vue'
 import Login from '../views/Login.vue'
+import BuildingDetail from '../views/BuildingDetail.vue'
 
 const routes = [
   { path: '/login', component: Login },
+  { path: '/building/:buildingId', component: BuildingDetail, meta: { requiresAuth: true } },
   { path: '/', component: Dashboard, meta: { requiresAuth: true } },
 ]
 

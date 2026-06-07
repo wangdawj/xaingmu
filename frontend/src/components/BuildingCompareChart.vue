@@ -9,6 +9,7 @@ import * as echarts from 'echarts'
 const props = defineProps({
   data: { type: Array, default: () => [] },
 })
+const emit = defineEmits(['bar-click'])
 
 const chartRef = ref(null)
 let chart = null
@@ -38,10 +39,23 @@ function render() {
 }
 
 watch(() => props.data, render, { deep: true })
-onMounted(() => { render(); window.addEventListener('resize', () => chart?.resize()) })
+onMounted(() => {
+  render()
+  window.addEventListener('resize', () => chart?.resize())
+  setTimeout(() => {
+    if (chart) {
+      chart.off('click')
+      chart.on('click', (p) => {
+        if (p.dataIndex != null && props.data[p.dataIndex]) {
+          emit('bar-click', props.data[p.dataIndex].building_id)
+        }
+      })
+    }
+  }, 300)
+})
 onUnmounted(() => { chart?.dispose() })
 </script>
 
 <style scoped>
-.chart { width: 100%; height: 320px; }
+.chart { width: 100%; height: 310px; }
 </style>

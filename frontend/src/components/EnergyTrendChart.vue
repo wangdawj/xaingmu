@@ -24,9 +24,13 @@ function render() {
   chart.setOption({
     title: { text: props.title, left: 'center', textStyle: { fontSize: 14 } },
     tooltip: { trigger: 'axis' },
-    grid: { left: 50, right: 20, top: 50, bottom: 30 },
+    grid: { left: 50, right: 20, top: 50, bottom: 60 },
     xAxis: { type: 'category', data: times, boundaryGap: false },
     yAxis: { type: 'value', name: 'kWh' },
+    dataZoom: [
+      { type: 'inside', start: 0, end: 100 },
+      { type: 'slider', start: 0, end: 100, height: 20, bottom: 6 },
+    ],
     series: [{
       name: '能耗',
       type: 'line',
@@ -44,5 +48,5 @@ onUnmounted(() => { chart?.dispose() })
 </script>
 
 <style scoped>
-.chart { width: 100%; height: 320px; }
+.chart { width: 100%; height: 310px; }
 </style>

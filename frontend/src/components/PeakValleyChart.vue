@@ -39,5 +39,5 @@ onUnmounted(() => { chart?.dispose() })
 </script>
 
 <style scoped>
-.chart { width: 100%; height: 320px; }
+.chart { width: 100%; height: 310px; }
 </style>
