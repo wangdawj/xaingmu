@@ -1,0 +1,36 @@
+# 依赖
+node_modules/
+frontend/.npm-cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 构建产物
+frontend/dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 环境
+.env.local
+.env.*.local
+*.log
+
+# Docker 卷
+mysql_data/
+influxdb2_data/
+
+# 临时文件
+run.txt
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 汉化文件（非项目源码）
+app-Windows-x86.asar
