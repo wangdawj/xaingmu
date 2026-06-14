@@ -32,7 +32,7 @@ docker exec campus-backend python ml/prediction/energy_forecast.py
 │   ├── cleaning/              # Pandas 数据清洗与异常检测
 │   ├── alert/                 # 实时预警引擎（规则阈值 + 滑动窗口）
 │   └── quality/               # 数据质量巡检（缺失/延迟/一致性校验）
-├── database/mysql/          # MySQL 建表脚本与初始化数据
+├── database/mysql/          # MySQL 建表脚本与查询语句
 ├── ml/prediction/           # 能耗预测模型（线性回归 + 随机森林）
 ├── docker-compose.yml       # 6 服务编排文件
 └── docs/architecture.md     # 系统架构说明书
