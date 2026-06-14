@@ -120,7 +120,7 @@ setInterval(updateTime, 1000)
 const statCards = computed(() => {
   const total = trendData.value.reduce((s, d) => s + (d.value || 0), 0)
   const cnt = buildings.value.length
-  const alerts = alertStats.value?.records?.length
+  const alerts = alertStats.value?.total_count
     || Object.values(alertStats.value?.severity_count || {}).reduce((a, b) => a + b, 0) || 0
   const carbon = Math.round(total * 0.785)
   const fmt = (v) => v >= 10000 ? (v / 10000).toFixed(1) + '万' : v.toLocaleString('zh-CN')

@@ -174,6 +174,7 @@ def alert_stats():
     query = AlertRecord.query
     if status:
         query = query.filter_by(status=status)
+    total_count = query.count()
     records = query.order_by(AlertRecord.triggered_at.desc()).limit(100).all()
 
     # 统计各级别告警数量
@@ -185,6 +186,7 @@ def alert_stats():
     return jsonify({
         "code": 0,
         "data": {
+            "total_count": total_count,
             "severity_count": severity_count,
             "records": [{
                 "alert_id": r.alert_id,
