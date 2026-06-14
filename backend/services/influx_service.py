@@ -123,11 +123,20 @@ class EnergyQueryService:
     # ---------- 峰谷分析 ----------
 
     def query_peak_valley(self, hours: int = 24):
-        """峰时段(8-22点) vs 谷时段(22-次日8点)"""
+        """峰时段(8-22点) vs 谷时段(22-次日8点)
+        
+        策略：先按 building_id + hour 取每栋楼每小时的平均功率（kW），
+        再跨建筑求和得到该小时校园总平均功率，然后按峰/谷时段分类累加。
+        这样可以消除同一小时内大量实时记录造成的 SUM 膨胀问题。
+        """
         sql = """
-            SELECT HOUR(event_time) AS h, SUM(value) AS total
-            FROM energy_record
-            WHERE event_time >= NOW() - INTERVAL :hours HOUR
+            SELECT h, SUM(avg_val) AS total FROM (
+                SELECT HOUR(event_time) AS h, building_id,
+                       AVG(value) AS avg_val
+                FROM energy_record
+                WHERE event_time >= NOW() - INTERVAL :hours HOUR
+                GROUP BY h, building_id
+            ) t
             GROUP BY h
         """
         rows = self._query(sql, {"hours": hours})

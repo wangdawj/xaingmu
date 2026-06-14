@@ -63,6 +63,13 @@
       </el-col>
     </el-row>
 
+    <!-- 图表行3：能耗预测 -->
+    <el-row :gutter="14" class="chart-row">
+      <el-col :span="24">
+        <el-card shadow="never"><ForecastChart :data="forecastData" /></el-card>
+      </el-col>
+    </el-row>
+
     <!-- 节能建议表格 -->
     <el-card shadow="never" class="section">
       <template #header>决策建议 · 基于数据分析的节能方案</template>
@@ -93,6 +100,7 @@ import BuildingCompareChart from '../components/BuildingCompareChart.vue'
 import PeakValleyChart from '../components/PeakValleyChart.vue'
 import HeatmapChart from '../components/HeatmapChart.vue'
 import AlertStatsChart from '../components/AlertStatsChart.vue'
+import ForecastChart from '../components/ForecastChart.vue'
 import CampusMap from '../components/CampusMap.vue'
 
 const online = ref(false)
@@ -105,6 +113,7 @@ const compareData = ref([])
 const peakValley = ref({})
 const heatmapData = ref([])
 const alertStats = ref({})
+const forecastData = ref({})
 const advices = ref([])
 const buildings = ref([])
 
@@ -134,7 +143,7 @@ const statCards = computed(() => {
 
 async function loadAll() {
   const h = rangeHours[range.value] || 24
-  const [a, b, c, d, e, f, g] = await Promise.allSettled([
+  const [a, b, c, d, e, f, g, fc] = await Promise.allSettled([
     api.get(`/energy/trend?hours=${h}`),
     api.get(`/energy/comparison?hours=${h}`),
     api.get(`/energy/peak-valley?hours=${h}`),
@@ -142,6 +151,7 @@ async function loadAll() {
     api.get('/energy/alerts'),
     api.get('/energy/advice'),
     api.get('/energy/buildings/status'),
+    api.get('/energy/forecast'),
   ])
   if (a.status === 'fulfilled') trendData.value = a.value.data.data || []
   if (b.status === 'fulfilled') compareData.value = b.value.data.data || []
@@ -150,6 +160,7 @@ async function loadAll() {
   if (e.status === 'fulfilled') alertStats.value = e.value.data.data || {}
   if (f.status === 'fulfilled') advices.value = f.value.data.data || []
   if (g.status === 'fulfilled') buildings.value = g.value.data.data || []
+  if (fc.status === 'fulfilled') forecastData.value = fc.value.data.data || {}
   refreshCount.value++
 }
 

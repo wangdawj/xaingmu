@@ -20,6 +20,7 @@ from shared.connections import create_kafka_producer
 TOPIC = "energy.raw"
 
 # 全部建筑列表（building_id, region_id, meter_id, 基准功率 kW）
+# 与数据库 building 表保持一致（B001~B006）
 BUILDINGS = [
     {"building_id": "B001", "region_id": "R001", "meter_id": "M001", "base_kw": 150},
     {"building_id": "B002", "region_id": "R001", "meter_id": "M002", "base_kw": 120},
@@ -27,12 +28,10 @@ BUILDINGS = [
     {"building_id": "B004", "region_id": "R002", "meter_id": "M005", "base_kw": 70},
     {"building_id": "B005", "region_id": "R001", "meter_id": "M004", "base_kw": 200},
     {"building_id": "B006", "region_id": "R001", "meter_id": "M006", "base_kw": 100},
-    {"building_id": "B007", "region_id": "R002", "meter_id": "M007", "base_kw": 180},
-    {"building_id": "B008", "region_id": "R002", "meter_id": "M008", "base_kw": 90},
 ]
 
 
-def generate_record():
+def generate_record(b=None):
     """生成一条模拟的能耗采集记录
 
     功率模拟策略：
@@ -42,7 +41,8 @@ def generate_record():
         4. 添加 ±10% 随机噪声
         5. 电压 218~242V，电流 = 功率 / 电压
     """
-    b = random.choice(BUILDINGS)
+    if b is None:
+        b = random.choice(BUILDINGS)
     now = datetime.now(timezone.utc)
     hour = now.hour
     weekday = now.weekday()
@@ -74,32 +74,30 @@ def generate_record():
     }
 
 
-def main(interval_sec: float = 1.0, batch_size: int = 10):
-    """采集器主循环：批量发送模拟数据到 Kafka
+def main(interval_sec: float = 1.0):
+    """采集器主循环：每轮给全部建筑各发一条数据到 Kafka
 
     Args:
         interval_sec: 发送间隔（秒），默认 1 秒
-        batch_size: 每批发送条数，默认 10 条
     """
     producer = create_kafka_producer()
-    print(f"[Producer] 开始向 topic [{TOPIC}] 发送模拟数据...")
+    print(f"[Producer] 开始向 topic [{TOPIC}] 发送 {len(BUILDINGS)} 栋建筑的模拟数据...")
     count = 0
     try:
         while True:
-            for _ in range(batch_size):
-                record = generate_record()
+            for b in BUILDINGS:
+                record = generate_record(b)
                 try:
                     producer.send(TOPIC, record)
                     count += 1
                 except Exception as e:
-                    # 发送失败时尝试重连
                     print(f"[Producer] 发送失败，尝试重连: {e}")
                     producer.close()
                     time.sleep(3)
                     producer = create_kafka_producer()
             producer.flush()
-            if count % 100 == 0:
-                print(f"[Producer] 已发送 {count} 条")
+            if count % 60 == 0:
+                print(f"[Producer] 已发送 {count} 条 ({count // 6} 轮)")
             time.sleep(interval_sec)
     except KeyboardInterrupt:
         print(f"\n[Producer] 停止采集，共发送 {count} 条")
