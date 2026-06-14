@@ -1,224 +1,293 @@
 """
-能耗预测模型（MySQL 版）
-========================
-基于 Scikit-learn 的短期能耗预测：
-- 线性回归 + 随机森林双模型对比
-- 从 MySQL energy_record 表加载真实历史数据训练
-- 特征：小时循环编码、星期、月份、是否周末
-- 输出：未来 24 小时预测 + 模型评估指标
+=============================================================================
+能耗预测独立脚本（Energy Forecast — Standalone Script）
+=============================================================================
+【功能说明】
+  从 MySQL energy_record 表加载历史数据，训练 Scikit-learn 双模型
+  （线性回归 + 随机森林），评估并输出预测结果。
+  与 backend/routes/energy.py 中的 /api/energy/forecast 接口逻辑一致，
+  区别：此脚本用于命令行手动运行和调试，接口用于前端调用。
 
-用法:
-    python energy_forecast.py                    # 命令行运行，输出到 JSON
-    或导入: from ml.prediction.energy_forecast import load_data, train_and_predict
+【运行方式】
+  python energy_forecast.py          → 预测 B001（默认）
+  python energy_forecast.py B005     → 预测指定建筑
+
+【输出内容】
+  1. 数据加载统计（总条数、采样后条数、生成模拟数据条数）
+  2. 模型评估指标（MAE、R²）
+  3. 特征重要性排序
+  4. 未来 24 小时预测表（逐小时）（用于答辩展示）
+
+【依赖说明】
+  需要先 pip install scikit-learn pandas numpy pymysql sqlalchemy
+  或使用后端 Dockerfile 中已安装的依赖
+=============================================================================
 """
 
-import json
-import os
+import sys
+import pandas as pd
+import numpy as np
+
+# Scikit-learn 模型
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, r2_score
+
+# 数据库连接
+from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
 
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import train_test_split, GridSearchCV
 
-
-def load_data(building_id: str = "B001", days: int = 60,
-              host: str = "mysql", port: int = 3306,
-              user: str = "energy", password: str = "energy123",
-              database: str = "campus_energy") -> pd.DataFrame:
-    """从 MySQL energy_record 表加载真实历史能耗数据
+def load_data_from_mysql(building_id: str = "B001", days: int = 60) -> pd.DataFrame:
+    """从 MySQL 拉取指定建筑的历史能耗数据
 
     Args:
-        building_id: 目标建筑编号
-        days: 加载最近 N 天的数据
-        host: MySQL 主机地址（Docker 内用 "mysql"，宿主机用 "localhost"）
+        building_id: 建筑编号（默认 B001）
+        days:        拉取最近多少天的数据
 
     Returns:
-        包含 hour, weekday, month, is_weekend, hour_sin, hour_cos, value 的 DataFrame
+        DataFrame with columns: [hour, weekday, value]
+        如果无数据返回空 DataFrame
     """
-    try:
-        import pymysql
-    except ImportError:
-        print("pymysql 未安装，回退到模拟数据。pip install pymysql")
-        return _generate_fallback_data(building_id, days)
-
-    try:
-        conn = pymysql.connect(
-            host=host, port=port, user=user, password=password,
-            database=database, charset="utf8mb4",
-        )
-        sql = """
-            SELECT
-                HOUR(event_time) AS hour,
-                WEEKDAY(event_time) AS weekday,
-                MONTH(event_time) AS month,
-                value
-            FROM energy_record
-            WHERE building_id = %s
-              AND event_time >= NOW() - INTERVAL %s DAY
-            ORDER BY event_time
-        """
-        df = pd.read_sql(sql, conn, params=(building_id, days))
-        conn.close()
-
-        if len(df) < 50:
-            print(f"MySQL 数据量不足 ({len(df)} 条)，回退到模拟数据")
-            return _generate_fallback_data(building_id, days)
-
-        print(f"从 MySQL 加载 {len(df)} 条训练数据 (building={building_id}, days={days})")
-    except Exception as e:
-        print(f"MySQL 连接失败: {e}，回退到模拟数据")
-        return _generate_fallback_data(building_id, days)
-
-    # 添加衍生特征
-    df["is_weekend"] = (df["weekday"] >= 5).astype(int)
-    # 循环时间编码：避免 23→0 的数值断层
-    df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
-    df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
-    df["building_id"] = building_id
-    return df
+    # SQLAlchemy 连接字符串
+    # 容器内 service name 是 "mysql"，本地运行可改为 "localhost"
+    engine = create_engine(
+        "mysql+pymysql://energy:energy123@mysql:3306/campus_energy?charset=utf8mb4"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT HOUR(event_time) AS hour,
+                       WEEKDAY(event_time) AS weekday,
+                       value
+                FROM energy_record
+                WHERE building_id = :bid
+                  AND event_time >= NOW() - INTERVAL :d DAY
+                ORDER BY event_time
+            """),
+            {"bid": building_id, "d": days},
+        ).fetchall()
+    engine.dispose()
+    if not rows:
+        return pd.DataFrame(columns=["hour", "weekday", "value"])
+    return pd.DataFrame(rows, columns=["hour", "weekday", "value"])
 
 
-def _generate_fallback_data(building_id: str = "B001", days: int = 30) -> pd.DataFrame:
-    """回退方案：生成模拟数据（当 MySQL 不可用时）"""
+def generate_synthetic_data(days: int = 14, base_kw: float = 150) -> pd.DataFrame:
+    """生成符合昼夜节律的模拟训练数据
+
+    【生成逻辑 — 与 Kafka Producer 完全一致】
+      - 基准功率：150kW（B001 的 base_kw）
+      - 白天(8-21点)：功率 = 基准 × (0.7~1.3) × 周末系数 × 随机噪声
+      - 夜间(22-7点)：功率 = 基准 × (0.2~0.5) × 周末系数 × 随机噪声
+      - 周末系数：工作日 1.0，周六日 0.8
+
+    Args:
+        days:    模拟数据的天数（默认 14 天，覆盖 2 个完整周）
+        base_kw: 基准功率（kW）
+
+    Returns:
+        DataFrame with columns: [hour, weekday, value]
+    """
     records = []
-    base = datetime.now() - timedelta(days=days)
-    for d in range(days):
+    for day in range(days):
         for h in range(24):
-            ts = base + timedelta(days=d, hours=h)
-            hour_factor = 1.5 if 8 <= h < 22 else 0.6
-            weekday_factor = 1.2 if ts.weekday() < 5 else 0.8
-            value = 200 * hour_factor * weekday_factor + np.random.normal(0, 15)
-            records.append({
-                "hour": h,
-                "weekday": ts.weekday(),
-                "month": ts.month,
-                "is_weekend": int(ts.weekday() >= 5),
-                "building_id": building_id,
-                "value": max(value, 0),
-            })
-    df = pd.DataFrame(records)
+            # weekday 按日历递增，从周六开始（确保覆盖周末）
+            wd = (6 + day) % 7
+            is_day = 8 <= h < 22
+            # 昼夜系数：白天功率高，夜间功率低
+            hour_factor = np.random.uniform(0.7, 1.3) if is_day else np.random.uniform(0.2, 0.5)
+            # 周末人流量减少，额外降低 20%
+            weekend_factor = 0.8 if wd >= 5 else 1.0
+            # 最终功率 = 基准 × 昼夜系数 × 周末系数 × 随机噪声(±10%)
+            value = round(base_kw * hour_factor * weekend_factor * np.random.uniform(0.9, 1.1), 2)
+            records.append({"hour": h, "weekday": wd, "value": value})
+    return pd.DataFrame(records)
+
+
+def build_features(df: pd.DataFrame) -> pd.DataFrame:
+    """构建机器学习特征
+
+    输入 DataFrame 需包含列 [hour, weekday, value]
+    输出在输入基础上新增特征列：
+
+      is_daytime (int) : 是否白天(8-21点)，二进制 0/1
+      is_weekend (int) : 是否周末(周六日)，二进制 0/1
+      hour_sin (float) : 小时的循环正弦编码 sin(2π × hour / 24)
+      hour_cos (float) : 小时的循环余弦编码 cos(2π × hour / 24)
+
+    【为什么用 sin/cos 循环编码？】
+      - 普通整数编码：23 点和 0 点差 23 个单位，但实际只差 1 小时
+      - sin/cos 编码：把 24 小时映射到单位圆上，23 点和 0 点位置相邻
+      - sin 和 cos 搭配使用：可以唯一确定圆上的任意位置
+        （单独用 sin 或 cos 有对称歧义，如 sin(π/4)=sin(3π/4)）
+    """
+    df = df.copy()
+    df["is_weekend"] = (df["weekday"] >= 5).astype(int)
+    df["is_daytime"] = ((df["hour"] >= 8) & (df["hour"] < 22)).astype(int)
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
     df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
     return df
 
 
-def train_and_predict(df: pd.DataFrame, building_id: str = "B001",
-                      tune_hyperparams: bool = False):
-    """训练预测模型并生成未来 24 小时预测
-
+def train_and_evaluate(X, y, random_state=42):
+    """训练评估双模型（线性回归 + 随机森林）
+    
     Args:
-        df: 训练数据（包含 features 和 target）
-        building_id: 要预测的建筑编号
-        tune_hyperparams: 是否启用 GridSearchCV 超参数调优（耗时）
-
+        X: 特征矩阵
+        y: 目标值（功率 kW）
+        random_state: 随机种子（保证可复现）
+    
     Returns:
-        {"metrics": {...}, "forecast": [...], "feature_importance": [...]}
+        tuple: (metrics_dict, feature_importance_list, trained_models_dict)
     """
-    # 特征列（使用循环编码替代原始 hour）
-    features = ["hour_sin", "hour_cos", "weekday", "month", "is_weekend"]
-
-    # 筛选目标建筑的数据
-    sub = df[df["building_id"] == building_id] if "building_id" in df.columns else df
-    X = sub[features]
-    y = sub["value"]
-
-    if len(X) < 10:
-        raise ValueError(f"训练数据不足 ({len(X)} 条)，至少需要 10 条")
-
-    # 训练集/测试集划分（80% / 20%）
+    # 训练集/测试集拆分：80% 训练 / 20% 测试
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
+        X, y, test_size=0.2, random_state=random_state
     )
 
-    # 模型 1：线性回归（快速基线）
-    lr = LinearRegression()
+    # ------ 模型 1：岭回归（L2 正则化线性回归） ------
+    # Ridge 对特征系数加 L2 惩罚 ∑α·w²，防止多共线性导致系数爆炸
+    lr = Ridge(alpha=1.0)
     lr.fit(X_train, y_train)
-
-    # 模型 2：随机森林
-    if tune_hyperparams:
-        # 网格搜索调优
-        rf_grid = GridSearchCV(
-            RandomForestRegressor(random_state=42),
-            {"n_estimators": [50, 100, 200],
-             "max_depth": [None, 10, 20],
-             "min_samples_split": [2, 5]},
-            cv=3, scoring="neg_mean_absolute_error", n_jobs=-1,
-        )
-        rf_grid.fit(X_train, y_train)
-        rf = rf_grid.best_estimator_
-        print(f"随机森林最优参数: {rf_grid.best_params_}")
-    else:
-        rf = RandomForestRegressor(n_estimators=100, max_depth=15, random_state=42)
-        rf.fit(X_train, y_train)
-
-    # 测试集评估
     y_pred_lr = lr.predict(X_test)
+
+    # ------ 模型 2：随机森林 ------
+    # n_estimators=100: 100 棵决策树集成（越多越稳，但越慢）
+    # max_depth=None:   不限制深度（依赖 min_samples_leaf 防过拟合）
+    # min_samples_leaf=10: 每叶至少 10 个样本（控制模型复杂度）
+    rf = RandomForestRegressor(
+        n_estimators=100, max_depth=None, min_samples_leaf=10, random_state=random_state
+    )
+    rf.fit(X_train, y_train)
     y_pred_rf = rf.predict(X_test)
 
+    # ------ 计算评估指标 ------
+    # MAE：平均绝对误差，与 y 同单位，直观易理解
+    # R²：决定系数 0~1，1 为完美预测，负值表示不如直接用均值预测
+    lr_mae = mean_absolute_error(y_test, y_pred_lr)
+    lr_r2 = r2_score(y_test, y_pred_lr)
+    rf_mae = mean_absolute_error(y_test, y_pred_rf)
+    rf_r2 = r2_score(y_test, y_pred_rf)
+
     metrics = {
-        "linear_regression": {
-            "mae": round(mean_absolute_error(y_test, y_pred_lr), 2),
-            "r2": round(r2_score(y_test, y_pred_lr), 4),
-        },
-        "random_forest": {
-            "mae": round(mean_absolute_error(y_test, y_pred_rf), 2),
-            "r2": round(r2_score(y_test, y_pred_rf), 4),
-        },
-        "train_samples": len(X_train),
-        "test_samples": len(X_test),
+        "ridge": {"mae": round(float(lr_mae), 2), "r2": round(float(lr_r2), 4)},
+        "random_forest": {"mae": round(float(rf_mae), 2), "r2": round(float(rf_r2), 4)},
+        "samples": f"{len(X_train)}/{len(X_test)} (train/test)",
     }
 
-    # 特征重要性（仅随机森林）
-    feat_imp = sorted(
-        zip(features, rf.feature_importances_),
-        key=lambda x: x[1], reverse=True,
+    # ------ 特征重要性（随机森林输出） ------
+    # feature_importances_ 是每棵树分裂时该特征减少的不纯度总和
+    # 数值越高 → 该特征对预测越重要（总和 = 1）
+    feature_names = X.columns.tolist() if hasattr(X, 'columns') else []
+    importance = sorted(
+        zip(feature_names, rf.feature_importances_),
+        key=lambda x: x[1], reverse=True
     )
 
-    # 预测未来 24 小时
-    future = []
+    return metrics, importance, {"lr": lr, "rf": rf}
+
+
+def predict_future(models, features, hours=24):
+    """使用训练好的模型预测未来 N 小时能耗
+
+    Args:
+        models:   训练好的模型字典 {"lr": Ridge, "rf": RandomForest}
+        features: 特征列名列表
+        hours:    预测未来多少小时
+
+    Returns:
+        list[dict]: [{"time": "12:00", "lr": 119.5, "rf": 121.3}, ...]
+    """
     now = datetime.now()
-    for i in range(24):
+    predictions = []
+    for i in range(hours):
         ts = now + timedelta(hours=i)
-        hour = ts.hour
-        weekday = ts.weekday()
-        feat = pd.DataFrame([{
-            "hour_sin": np.sin(2 * np.pi * hour / 24),
-            "hour_cos": np.cos(2 * np.pi * hour / 24),
-            "weekday": weekday,
-            "month": ts.month,
-            "is_weekend": int(weekday >= 5),
-        }])
-        future.append({
-            "time": ts.strftime("%Y-%m-%d %H:00"),
-            "predicted_lr": round(float(lr.predict(feat)[0]), 2),
-            "predicted_rf": round(float(rf.predict(feat)[0]), 2),
+        h, wd = ts.hour, ts.weekday()
+        # 构建与训练集完全相同的特征向量
+        row = pd.DataFrame([{
+            "is_daytime": int(8 <= h < 22),
+            "is_weekend": int(wd >= 5),
+            "hour_sin": np.sin(2 * np.pi * h / 24),
+            "hour_cos": np.cos(2 * np.pi * h / 24),
+        }])[features]
+        pred_lr = float(models["lr"].predict(row)[0])
+        pred_rf = float(models["rf"].predict(row)[0])
+        predictions.append({
+            "time": ts.strftime("%H:00"),
+            "lr": round(max(pred_lr, 0), 2),   # 截断负值
+            "rf": round(max(pred_rf, 0), 2),
         })
-
-    return {
-        "building_id": building_id,
-        "metrics": metrics,
-        "feature_importance": [{"feature": f, "importance": round(i, 4)} for f, i in feat_imp],
-        "forecast": future,
-    }
+    return predictions
 
 
-def main():
-    """训练入口：加载真实数据 → 训练模型 → 保存结果"""
-    # 从 MySQL 加载（Docker 内），失败时自动回退到模拟数据
-    building_id = "B001"
-    df = load_data(building_id, days=60)
-    result = train_and_predict(df, building_id, tune_hyperparams=False)
-
-    output_path = os.path.join(os.path.dirname(__file__), "forecast_result.json")
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"模型训练完成 → {output_path}")
-    print(json.dumps(result["metrics"], ensure_ascii=False, indent=2))
-    print(f"特征重要性: {result['feature_importance']}")
-
-
+# ======================== 主函数 ========================
 if __name__ == "__main__":
-    main()
+    # 命令行参数：python energy_forecast.py [building_id]
+    building = sys.argv[1] if len(sys.argv) > 1 else "B001"
+    base_power = 150  # B001 基准功率
+
+    print(f"\n{'='*60}")
+    print(f"  校园能耗预测模型 — 建筑 {building}")
+    print(f"{'='*60}")
+
+    # ---- 1. 加载数据 ----
+    print(f"\n[1/5] 加载 MySQL 数据 (最近 60 天)...")
+    df = load_data_from_mysql(building)
+    print(f"      MySQL 返回 {len(df)} 条原始数据")
+
+    # ---- 2. 数据预处理（均匀采样） ----
+    if len(df) > 0:
+        before = len(df)
+        # 按小时均匀采样：每小时最多 20 条
+        df = df.groupby("hour", group_keys=False).apply(
+            lambda g: g.sample(n=min(20, len(g)), random_state=42)
+        ).reset_index(drop=True)
+        print(f"      均匀采样 {len(df)} 条 (原始 {before} 条)")
+
+    # 生成模拟数据并合并
+    print(f"      生成 14 天模拟数据...")
+    df_synth = generate_synthetic_data(days=14, base_kw=base_power)
+    df = pd.concat([df, df_synth], ignore_index=True) if len(df) > 0 else df_synth
+    print(f"      合并后共 {len(df)} 条 (真实 + 模拟)")
+
+    # ---- 3. 构建特征 ----
+    print(f"\n[2/5] 构建特征 (is_daytime, hour_sin/cos, is_weekend)...")
+    df = build_features(df)
+    features = ["is_daytime", "hour_sin", "hour_cos", "is_weekend"]
+    X = df[features]
+    y = df["value"]
+    print(f"      特征矩阵: {X.shape}")
+
+    # ---- 4. 训练评估 ----
+    print(f"\n[3/5] 训练双模型...")
+    metrics, importance, models = train_and_evaluate(X, y)
+
+    print(f"\n{'─'*40}")
+    print(f"  RIDGE 回归 ")
+    print(f"    MAE  = {metrics['ridge']['mae']} kW")
+    print(f"    R²   = {metrics['ridge']['r2']}")
+    print(f"  RANDOM FOREST")
+    print(f"    MAE  = {metrics['random_forest']['mae']} kW")
+    print(f"    R²   = {metrics['random_forest']['r2']}")
+    print(f"  样本   = {metrics['samples']}")
+
+    # ---- 5. 特征重要性 ----
+    print(f"\n[4/5] 特征重要性（随机森林输出）:")
+    feature_names_cn = {
+        "is_daytime": "是否白天", "hour_sin": "小时正弦",
+        "hour_cos": "小时余弦", "is_weekend": "是否周末",
+    }
+    for name, imp in importance:
+        bar = "█" * int(imp * 50)
+        print(f"  {feature_names_cn.get(name, name):<8}  {imp:.2%}  {bar}")
+
+    # ---- 6. 预测未来 24 小时 ----
+    print(f"\n[5/5] 预测未来 24 小时能耗:")
+    fc = predict_future(models, features, hours=24)
+    print(f"  {'时间':<8} {'岭回归':>8} {'随机森林':>8}")
+    print(f"  {'─'*28}")
+    for p in fc:
+        print(f"  {p['time']:<8} {p['lr']:>8.1f} {p['rf']:>8.1f}")
+    print(f"\n{'='*60}\n")

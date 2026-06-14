@@ -305,6 +305,38 @@ def buildings_stream():
 
 
 # ======================== 能耗预测接口 ========================
+#
+# 【接口设计说明】
+#   GET /api/energy/forecast
+#   返回 JSON: { code, data: { metrics, feature_importance, forecast } }
+#
+# 【模型架构】
+#   双模型对比方案：
+#     1. Ridge 回归（L2 正则化线性回归，alpha=1.0）
+#        - 优点：训练快、可解释性强，L2 正则化解决多共线性
+#        - 对比普通线性回归：系数不会爆炸（如遇到高度相关特征时）
+#     2. 随机森林（100 棵树，不限深度，每叶至少 10 样本）
+#        - 优点：捕捉非线性关系，输出特征重要性
+#        - max_depth=None 不限制深度（依赖 min_samples_leaf 防过拟合）
+#
+# 【特征工程】
+#   is_daytime: 是否白天(8-21点)，布尔值 → 最关键特征（importance ~89%）
+#   hour_sin/hou_cos: 小时的正弦/余弦循环编码
+#      - 为什么用 sin/cos 而不用原始 0-23？
+#        避免数值断层：23 点和 0 点在数字上差 23，实际上只差 1 小时
+#        sin/cos 把小时映射回单位圆，23点和0点在圆上是连续的
+#   is_weekend: 是否周末
+#
+# 【数据策略】
+#   1. 从 MySQL 拉取 B001 最近 60 天数据
+#   2. groupby("hour").sample(n=20)：每小时均匀采样，防止某一小时垄断训练集
+#   3. 生成 14 天模拟数据（与 Producer 同逻辑），1:1 混合
+#   4. train_test_split(test_size=0.2)：80% 训练，20% 评估
+#
+# 【缓存机制】
+#   _forecast_cache: { data, ts }
+#   TTL = 600 秒（10 分钟）
+#   避免每次请求都重新训练模型（训练一次约需 1-2 秒）
 
 # 模块级缓存：避免每次请求都重新训练（每 10 分钟刷新一次模型）
 _forecast_cache = {"data": None, "ts": 0}
@@ -313,20 +345,16 @@ _FORECAST_TTL = 600  # 缓存有效期（秒）
 
 @energy_bp.route("/forecast", methods=["GET"])
 def energy_forecast():
-    """能耗预测：线性回归 + 随机森林双模型对比，预测未来 24 小时
-
-    数据策略：
-        - 优先使用 MySQL 全量 energy_record 数据（不限建筑，所有楼宇共享昼夜规律）
-        - 数据量 < 500 时，自动生成符合实际分布的模拟数据作为补充训练集
-    """
+    """能耗预测接口：训练 Ridge + 随机森林双模型，预测未来 24 小时"""
     now = time.time()
+    # 缓存命中：直接返回上次训练结果
     if _forecast_cache["data"] is not None and (now - _forecast_cache["ts"]) < _FORECAST_TTL:
         return jsonify({"code": 0, "data": _forecast_cache["data"]})
 
     try:
         import pandas as pd
         import numpy as np
-        from sklearn.linear_model import LinearRegression
+        from sklearn.linear_model import Ridge  # L2 正则化线性回归
         from sklearn.ensemble import RandomForestRegressor
         from sklearn.metrics import mean_absolute_error, r2_score
         from sklearn.model_selection import train_test_split
@@ -334,67 +362,116 @@ def energy_forecast():
         from sqlalchemy import text
         from datetime import datetime, timedelta
 
-        # 1. 生成符合 Producer 逻辑的 7 天 × 24 小时训练数据
-        #    （真实数据时间跨度不足时，用模拟数据补充日/夜节律）
+        # ================================================================
+        # 步骤 1：加载真实数据（B001 最近 60 天）
+        # ================================================================
+        # 只取 B001 而非全建筑：跨建筑功率差异大（70~200kW），混合后
+        # 方差淹没昼夜规律，模型学不到有效模式
         rows = db.session.execute(text("""
-            SELECT HOUR(event_time) AS hour, WEEKDAY(event_time) AS weekday, value
+            SELECT
+                HOUR(event_time) AS hour,       -- 采样小时(0-23)
+                WEEKDAY(event_time) AS weekday, -- 星期几(0=周一)
+                value                           -- 功率值(kW)
             FROM energy_record
-            WHERE building_id = 'B001' AND event_time >= NOW() - INTERVAL 60 DAY
+            WHERE building_id = 'B001'           -- 单建筑训练
+              AND event_time >= NOW() - INTERVAL 60 DAY
             ORDER BY event_time
         """)).fetchall()
 
         df_real = pd.DataFrame(rows, columns=["hour", "weekday", "value"])
         n_real_raw = len(df_real)
 
-        # 按小时均匀采样：每小时最多保留 20 条，避免某一小时（如大量实时记录）
-        # 淹没其他时段，导致模型无法学习昼夜节律
+        # ---- 关键：按小时均匀采样 ----
+        # 问题：Producer 刚启动时，所有数据集中在当前小时（如 11 点）
+        #      假设 3500 条数据中 99% 是 hour=11，模型只能学会"全是一个值"
+        # 解决：groupby("hour") → 每小时最多保留 20 条
+        #      这样即使 11 点有 3000 条，也只保留 20 条与其他小时均衡
         if n_real_raw > 0:
             df_real = df_real.groupby("hour", group_keys=False).apply(
                 lambda g: g.sample(n=min(20, len(g)), random_state=42)
             ).reset_index(drop=True)
         n_real = len(df_real)
 
-        # 生成 14 天模拟数据（与 Producer 相同昼夜逻辑）
-        base_kw = 150
+        # ================================================================
+        # 步骤 2：生成 14 天模拟数据（补齐昼夜节律）
+        # ================================================================
+        # 为什么需要模拟数据？
+        #   真实数据时间跨度不足（可能只有几个小时的覆盖度）
+        #   模拟数据确保 24 小时 × 14 天 的完备昼夜样本
+        #
+        # 生成逻辑与 Kafka Producer 完全一致：
+        #   - 基准功率 150kW（B001 的 base_kw）
+        #   - 白天 0.7~1.3 倍，夜间 0.2~0.5 倍
+        #   - 周末降低 20%
+        #   - ±10% 随机噪声
+        base_kw = 150  # B001 基准功率
         synth = []
-        for day in range(14):
-            for h in range(24):
-                wd = (6 + day) % 7  # 从周六开始，确保覆盖周末
-                is_day = 8 <= h < 22
+        for day in range(14):                          # 覆盖 14 天（2 个完整周）
+            for h in range(24):                        # 每天 24 个整点
+                wd = (6 + day) % 7                     # 从周六开始，确保覆盖周末
+                is_day = 8 <= h < 22                   # 是否白天
+                # 昼夜系数：白天 0.7~1.3，夜间 0.2~0.5
                 hour_factor = np.random.uniform(0.7, 1.3) if is_day else np.random.uniform(0.2, 0.5)
-                weekend_factor = 0.8 if wd >= 5 else 1.0
+                weekend_factor = 0.8 if wd >= 5 else 1.0  # 周末降 20%
+                # 最终功率 = 基准 × 昼夜 × 周末 × 噪声
                 value = round(base_kw * hour_factor * weekend_factor * np.random.uniform(0.9, 1.1), 2)
                 synth.append({"hour": h, "weekday": wd, "value": value})
         df_synth = pd.DataFrame(synth)
 
-        # 真实数据 + 模拟数据 1:1 混合，确保昼夜节律不被淹没
+        # 1:1 混合真实数据和模拟数据
+        # 不放大真实数据权重（之前 ×3 导致真实数据淹没模拟数据）
         df = pd.concat([df_real, df_synth], ignore_index=True) if n_real > 0 else df_synth
         data_source = f"B001 real({n_real})+synth({len(synth)})"
 
-        # 2. 构建时间特征
+        # ================================================================
+        # 步骤 3：构建特征
+        # ================================================================
+        # is_weekend: 布尔值，(weekday >= 5) → 周六日
         df["is_weekend"] = (df["weekday"] >= 5).astype(int)
+        # is_daytime: 布尔值，(8 <= hour < 22) → 白天
         df["is_daytime"] = ((df["hour"] >= 8) & (df["hour"] < 22)).astype(int)
+        # hour_sin / hour_cos: 循环时间编码
+        # 为什么不用 hour 原始值？因为 23 点和 0 点数值差 23，
+        # 但实际上只差 1 小时。sin/cos 把小时映射到单位圆上做连续编码
+        # 24 小时 = 360° = 2π，h / 24 归一化后 × 2π
         df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
         df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
 
+        # 特征列：只用 4 个时间特征
+        # 不用 building_id（单建筑训练，且 one-hot 会吞掉时间特征重要性）
         features = ["is_daytime", "hour_sin", "hour_cos", "is_weekend"]
         X = df[features]
         y = df["value"]
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # 80% 训练集 / 20% 测试集
+        # random_state=42 保证每次切分一致（可复现）
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
 
-        # 3. 训练模型（Ridge 回归 + 随机森林）
-        from sklearn.linear_model import Ridge
+        # ================================================================
+        # 步骤 4：训练模型
+        # ================================================================
+        # Ridge(L2 正则化)：对特征权重加惩罚，避免多共线性导致系数爆炸
+        # alpha=1.0 是正则化强度，越大 → 系数越趋于 0 → 模型越稳但可能欠拟合
         lr = Ridge(alpha=1.0)
         lr.fit(X_train, y_train)
+
+        # 随机森林：100 棵树集成
+        # max_depth=None：不限制树深度（让每棵树充分生长）
+        # min_samples_leaf=10：每片叶子至少 10 个样本 → 防止过拟合
+        # random_state=42：固定随机种子，保证可复现
         rf = RandomForestRegressor(
             n_estimators=100, max_depth=None, min_samples_leaf=10, random_state=42,
         )
         rf.fit(X_train, y_train)
 
+        # ---- 测试集预测 & 评估 ----
         y_pred_lr = lr.predict(X_test)
         y_pred_rf = rf.predict(X_test)
 
+        # MAE (Mean Absolute Error)：平均绝对误差，单位与 y 一致(kW)，越小越好
+        # R² (R-squared)：决定系数 0~1，越接近 1 拟合越好
         metrics = {
             "ridge_regression": {
                 "mae": round(float(mean_absolute_error(y_test, y_pred_lr)), 2),
@@ -409,8 +486,15 @@ def energy_forecast():
             "data_source": data_source,
         }
 
-        # 4. 特征重要性
-        imp = sorted(zip(features, rf.feature_importances_), key=lambda x: x[1], reverse=True)
+        # ================================================================
+        # 步骤 5：特征重要性（随机森林输出）
+        # ================================================================
+        # rf.feature_importances_ 返回每个特征对预测的贡献度（总和 = 1）
+        # 按重要性降序排列
+        imp = sorted(
+            zip(features, rf.feature_importances_), key=lambda x: x[1], reverse=True
+        )
+        # 特征名中文化映射
         feature_names = {
             "is_daytime": "是否白天", "hour_sin": "小时正弦",
             "hour_cos": "小时余弦", "is_weekend": "是否周末",
@@ -420,24 +504,30 @@ def energy_forecast():
             for f, i in imp
         ]
 
-        # 5. 预测未来 24 小时
+        # ================================================================
+        # 步骤 6：预测未来 24 小时
+        # ================================================================
+        # 从当前时间起，逐小时预测未来 24 个点的能耗值
         future = []
         now_dt = datetime.now()
         for i in range(24):
-            ts = now_dt + timedelta(hours=i)
-            h, wd = ts.hour, ts.weekday()
+            ts = now_dt + timedelta(hours=i)  # 未来第 i 小时的时间
+            h, wd = ts.hour, ts.weekday()     # 该时间的小时和星期几
+            # 构建与训练集相同的特征向量
             row_f = pd.DataFrame([{
-                "is_daytime": int(8 <= h < 22),
-                "hour_sin": np.sin(2 * np.pi * h / 24),
-                "hour_cos": np.cos(2 * np.pi * h / 24),
-                "is_weekend": int(wd >= 5),
+                "is_daytime": int(8 <= h < 22),               # 是否白天
+                "hour_sin": np.sin(2 * np.pi * h / 24),        # 小时正弦编码
+                "hour_cos": np.cos(2 * np.pi * h / 24),        # 小时余弦编码
+                "is_weekend": int(wd >= 5),                    # 是否周末
             }])[features]
+            # 两个模型分别预测
             val_lr = float(lr.predict(row_f)[0])
             val_rf = float(rf.predict(row_f)[0])
+            # 截断负值：线性回归可能在夜间外推到负数（max 保证 ≥ 0）
             future.append({
-                "time": ts.strftime("%H:00"),
-                "predicted_lr": round(max(val_lr, 0), 2),
-                "predicted_rf": round(max(val_rf, 0), 2),
+                "time": ts.strftime("%H:00"),          # 时间标签：如 "12:00"
+                "predicted_lr": round(max(val_lr, 0), 2),  # 岭回归预测
+                "predicted_rf": round(max(val_rf, 0), 2),  # 随机森林预测
             })
 
         result = {
