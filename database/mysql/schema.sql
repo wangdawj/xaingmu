@@ -81,6 +81,37 @@ CREATE TABLE IF NOT EXISTS alert_record (
     FOREIGN KEY (rule_id) REFERENCES alert_rule(rule_id)
 ) ENGINE=InnoDB COMMENT='告警记录';
 
+-- 能耗时序数据表（替代 InfluxDB electricity_data）
+CREATE TABLE IF NOT EXISTS energy_record (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    building_id  VARCHAR(32)   NOT NULL,
+    region_id    VARCHAR(32)   NOT NULL,
+    meter_id     VARCHAR(32)   NOT NULL,
+    energy_type  VARCHAR(20)   NOT NULL DEFAULT 'electricity',
+    data_type    VARCHAR(20)   NOT NULL DEFAULT 'realtime',
+    value        DECIMAL(12,2) NOT NULL COMMENT '功率(kWh)',
+    voltage      DECIMAL(6,1)  DEFAULT 0  COMMENT '电压(V)',
+    current_val  DECIMAL(6,2)  DEFAULT 0  COMMENT '电流(A)',
+    event_time   DATETIME(3)   NOT NULL COMMENT '采集时间(毫秒精度)',
+    created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_building_time (building_id, event_time),
+    INDEX idx_event_time (event_time),
+    INDEX idx_region_building (region_id, building_id),   -- 热力图查询优化
+    INDEX idx_meter_time (meter_id, event_time)
+) ENGINE=InnoDB COMMENT='能耗时序数据表';
+
+-- 分项能耗记录表（照明/空调/插座）
+CREATE TABLE IF NOT EXISTS energy_sub_record (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    building_id  VARCHAR(32)   NOT NULL,
+    sub_type     VARCHAR(20)   NOT NULL COMMENT 'lighting/ac/outlet',
+    value        DECIMAL(12,2) NOT NULL COMMENT '功率(kWh)',
+    event_time   DATETIME(3)   NOT NULL,
+    created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_building_time (building_id, event_time),
+    INDEX idx_sub_type (sub_type)
+) ENGINE=InnoDB COMMENT='分项能耗记录表';
+
 -- 日统计汇总
 CREATE TABLE IF NOT EXISTS energy_daily_summary (
     id            BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -125,7 +156,7 @@ CREATE TABLE IF NOT EXISTS sys_user (
 CREATE TABLE IF NOT EXISTS data_quality_log (
     log_id        BIGINT AUTO_INCREMENT PRIMARY KEY,
     check_time    DATETIME     NOT NULL,
-    data_source   VARCHAR(50)  NOT NULL COMMENT 'influxdb/mysql/hive',
+    data_source   VARCHAR(50)  NOT NULL COMMENT 'mysql/kafka',
     check_type    VARCHAR(50)  NOT NULL COMMENT 'missing/outlier/delay/consistency',
     target_table  VARCHAR(100),
     issue_count   INT          NOT NULL DEFAULT 0,

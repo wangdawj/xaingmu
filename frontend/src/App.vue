@@ -1,9 +1,7 @@
+<!-- 根组件 -->
 <template>
   <router-view />
 </template>
-
-<script setup>
-</script>
 
 <style>
 :root {
@@ -22,46 +20,25 @@
   --radius: 10px;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
-
-/* 全局卡片 */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  background: var(--bg); color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
 .el-card {
   border-radius: var(--radius) !important;
   border: 1px solid var(--border) !important;
   box-shadow: var(--shadow) !important;
-  transition: box-shadow .3s;
 }
-.el-card:hover { box-shadow: var(--shadow-hover) !important; }
-
-/* 卡片标题 */
 .el-card__header {
-  padding: 14px 20px !important;
+  padding: 12px 18px !important;
   border-bottom: 1px solid var(--border) !important;
-  font-weight: 600;
-  font-size: 14px;
-  color: var(--text);
+  font-weight: 600; font-size: 14px;
   background: #fafafa;
   border-radius: var(--radius) var(--radius) 0 0 !important;
 }
-
-/* 全局滚动条 */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #d9d9d9; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #bfbfbf; }
-
-/* 表格优化 */
-.el-table { border-radius: var(--radius); overflow: hidden; }
+.el-card__body { padding: 16px; }
 .el-table th.el-table__cell { background: #fafafa; color: var(--text); font-weight: 600; }
-
-/* 按钮 */
-.el-button--primary { background: var(--primary); border-color: var(--primary); }
-.el-button--primary:hover { background: var(--primary-dark); border-color: var(--primary-dark); }
-.el-button.is-link { font-weight: 500; }
-
-/* 标签 */
-.el-tag--plain { border-color: #d9d9d9; }
-
-/* 图表卡片内容区 */
-.el-card .el-card__body { padding: 16px 20px; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: #d9d9d9; border-radius: 3px; }
 </style>

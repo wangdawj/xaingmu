@@ -1,44 +1,57 @@
+<!--
+  校园拓扑图组件
+  ============
+  使用 SVG 绘制校园建筑平面布局，实时展示各建筑运行状态。
+  - 绿色边框：正常 | 橙色边框：预警 | 红色边框（闪烁）：告警
+  - 点击建筑可跳转到建筑详情页
+-->
 <template>
   <el-card class="campus-map-card" shadow="hover">
     <div class="campus-map">
       <svg viewBox="0 0 800 500" class="topo-svg">
-        <!-- 道路/草地背景 -->
+        <!-- 草地背景 -->
         <rect x="0" y="0" width="800" height="500" fill="#e8f5e9" rx="8" />
-        <!-- 主干道 -->
+
+        <!-- 主干道（十字交叉） -->
         <line x1="0" y1="300" x2="800" y2="300" stroke="#bdbdbd" stroke-width="12" />
         <line x1="400" y1="0" x2="400" y2="500" stroke="#bdbdbd" stroke-width="10" />
-        <!-- 操场 -->
+
+        <!-- 运动场 -->
         <ellipse cx="650" cy="120" rx="100" ry="55" fill="#a5d6a7" stroke="#66bb6a" stroke-width="2" />
         <text x="650" y="125" text-anchor="middle" font-size="10" fill="#388e3c">运动场</text>
 
-        <!-- 动态渲染建筑 -->
-        <g v-for="(b, idx) in buildings" :key="b.building_id" @click="$emit('select', b.building_id)">
+        <!-- 动态渲染建筑（绑定 campusLayout 位置 + API 实时状态） -->
+        <g v-for="b in visibleBuildings" :key="b.building_id" @click="$emit('select', b.building_id)">
+          <!-- 建筑矩形 -->
           <rect
-            :x="getPos(idx).x"
-            :y="getPos(idx).y"
-            width="90"
-            height="55"
+            :x="b.layout.x"
+            :y="b.layout.y"
+            :width="b.layout.width"
+            :height="b.layout.height"
             rx="6"
-            :fill="getFillColor(b.status)"
+            :fill="getFillColor(b)"
             :stroke="b.status === 'critical' ? '#ff4d4f' : b.status === 'warning' ? '#fa8c16' : '#52c41a'"
             stroke-width="2"
             class="building-rect"
           >
+            <!-- critical 状态时边框闪烁动画 -->
             <animate
               v-if="b.status === 'critical'"
               attributeName="stroke-opacity"
               values="0.4;1;0.4" dur="1.5s" repeatCount="indefinite"
             />
           </rect>
+          <!-- 建筑名称 -->
           <text
-            :x="getPos(idx).x + 45"
-            :y="getPos(idx).y + 22"
+            :x="b.layout.x + b.layout.width / 2"
+            :y="b.layout.y + 22"
             text-anchor="middle" font-size="11" font-weight="bold"
             fill="#fff"
           >{{ b.building_name }}</text>
+          <!-- 当前功率 -->
           <text
-            :x="getPos(idx).x + 45"
-            :y="getPos(idx).y + 42"
+            :x="b.layout.x + b.layout.width / 2"
+            :y="b.layout.y + 42"
             text-anchor="middle" font-size="10"
             :fill="b.status === 'critical' ? '#fff' : '#e8f5e9'"
           >{{ b.current_power }} kW</text>
@@ -61,28 +74,32 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
-import api from '../api'
+import { computed } from 'vue'
+import { campusLayout } from '../config/campusLayout'
 
 const props = defineProps({ buildings: { type: Array, default: () => [] } })
-const emit = defineEmits(['select'])
+defineEmits(['select'])
 
-// 8 个预定义建筑位置
-const layout = [
-  { x: 50,  y: 60  },   // B001
-  { x: 170, y: 60  },   // B002
-  { x: 290, y: 60  },   // B003
-  { x: 50,  y: 180 },   // B004
-  { x: 170, y: 180 },   // B005
-  { x: 290, y: 180 },   // B006
-  { x: 50,  y: 340 },   // B007
-  { x: 170, y: 340 },   // B008
-]
+/**
+ * 将 API 返回的建筑数据与 campusLayout 布局信息合并
+ * 未配置布局的建筑使用默认位置
+ */
+const visibleBuildings = computed(() => {
+  return props.buildings.map(b => {
+    const layout = campusLayout.find(l => l.building_id === b.building_id) || {
+      x: 50, y: 60, width: 90, height: 55,
+    }
+    return { ...b, layout }
+  })
+})
 
-function getPos(idx) { return layout[idx] || { x: 50 + (idx % 3) * 120, y: 60 + Math.floor(idx / 3) * 130 } }
-function getFillColor(status) {
-  if (status === 'critical') return 'rgba(255,77,79,.85)'
-  if (status === 'warning') return 'rgba(250,140,22,.85)'
+/**
+ * 根据建筑状态返回填充色
+ * critical(告警) → 红色 | warning(预警) → 橙色 | normal → 蓝色
+ */
+function getFillColor(b) {
+  if (b.status === 'critical') return 'rgba(255,77,79,.85)'
+  if (b.status === 'warning') return 'rgba(250,140,22,.85)'
   return 'rgba(24,144,255,.75)'
 }
 </script>

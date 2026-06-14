@@ -1,38 +1,49 @@
+# =============================================================================
+# 校园综合能耗监测平台 — Docker Compose 编排文件（MySQL 单库版）
+# =============================================================================
+# 服务拓扑:
+#   ┌─────────┐     ┌────────────┐
+#   │  MySQL  │     │ Zookeeper  │
+#   └────┬────┘     └─────┬──────┘
+#        │                │
+#   ┌────┴──────┐   ┌─────┴──────┐
+#   │  backend  │   │   kafka    │
+#   └────┬──────┘   └─────┬──────┘
+#        │                │
+#   ┌────┴──────┐   ┌─────┴──────┐
+#   │  frontend │   │ pipeline   │
+#   └───────────┘   └────────────┘
+#
+# 启动: docker compose up -d
+# 停止: docker compose down
+# 查看: docker compose ps
+# =============================================================================
+
 services:
+
+  # ======================== MySQL 8.0 业务数据库 ========================
+  # 存储建筑信息、告警规则、用户、节能建议等业务数据
   mysql:
     image: mysql:8.0
     container_name: campus-mysql
     environment:
       MYSQL_ROOT_PASSWORD: root123
-      MYSQL_DATABASE: campus_energy
-      MYSQL_USER: energy
-      MYSQL_PASSWORD: energy123
+      MYSQL_DATABASE: campus_energy          # 自动创建数据库
+      MYSQL_USER: energy                      # 业务用户
+      MYSQL_PASSWORD: energy123               # 业务密码
     ports:
       - "3306:3306"
     volumes:
-      - mysql_data:/var/lib/mysql
-      - ./database/mysql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - mysql_data:/var/lib/mysql                                  # 数据持久化
+      - ./database/mysql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql  # 首次启动自动建表
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  influxdb:
-    image: influxdb:2.7
-    container_name: campus-influxdb
-    environment:
-      DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: admin
-      DOCKER_INFLUXDB_INIT_PASSWORD: admin123456
-      DOCKER_INFLUXDB_INIT_ORG: campus
-      DOCKER_INFLUXDB_INIT_BUCKET: energy
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: campus-energy-token
-    ports:
-      - "8086:8086"
-    volumes:
-      - influxdb_data:/var/lib/influxdb2
-
+  # ======================== Zookeeper（Kafka 依赖） ========================
+  # 为 Kafka 提供集群协调、元数据管理
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: campus-zookeeper
@@ -41,53 +52,87 @@ services:
     ports:
       - "2181:2181"
 
+  # ======================== Kafka 消息队列 ========================
+  # 用于实时采集数据的异步传输（模拟 OPC UA → Kafka → MySQL 管道）
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: campus-kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_started
     ports:
-      - "9092:9092"
+      - "9092:9092"                    # 外部访问（宿主机 → Kafka）
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # 双监听器：INTERNAL 供容器间通信，EXTERNAL 供宿主机访问
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1   # 单节点，副本=1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"     # 自动创建 topic
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 8
 
+  # ======================== Flask 后端 API ========================
+  # 提供 RESTful API 和 SSE 实时推送，依赖 MySQL 健康
   backend:
     build: ./backend
     container_name: campus-backend
     depends_on:
       mysql:
         condition: service_healthy
-      influxdb:
-        condition: service_started
     ports:
-      - "5000:5000"
+      - "5000:5000"                    # Flask 默认端口
+    environment:
+      # MySQL 连接（容器内服务名）
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: energy
+      MYSQL_PASSWORD: energy123
+      MYSQL_DATABASE: campus_energy
+      PYTHONUNBUFFERED: "1"            # 禁用 Python 输出缓冲
+    volumes:
+      - ./backend:/app                  # 挂载后端代码（开发热更新）
+      - ./ml:/app/ml                    # 挂载 ML 预测模块
+
+  # ======================== 数据管道（采集+清洗+告警） ========================
+  # 独立进程运行 run_all.py，启动 Kafka Producer / Consumer / Alert 三个线程
+  pipeline:
+    build: ./backend                 # 复用后端镜像（环境一致）
+    container_name: campus-pipeline
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     environment:
       MYSQL_HOST: mysql
       MYSQL_PORT: 3306
       MYSQL_USER: energy
       MYSQL_PASSWORD: energy123
       MYSQL_DATABASE: campus_energy
-      INFLUXDB_URL: http://influxdb:8086
-      INFLUXDB_TOKEN: campus-energy-token
-      INFLUXDB_ORG: campus
-      INFLUXDB_BUCKET: energy
-      KAFKA_BOOTSTRAP: kafka:9092
-      INFLUXDB_VERSION: "2"
+      KAFKA_BOOTSTRAP: kafka:29092
+      PYTHONUNBUFFERED: "1"
     volumes:
-      - ./backend:/app
+      - ./data-pipeline:/app/data-pipeline
+    command: python -u /app/data-pipeline/run_all.py
+    restart: unless-stopped           # 异常退出自动重启
 
+  # ======================== Vue 3 前端（Nginx 静态托管） ========================
+  # 构建产物通过 Nginx 提供静态服务，反向代理 /api 到后端
   frontend:
     build: ./frontend
     container_name: campus-frontend
     depends_on:
       - backend
     ports:
-      - "8080:80"
+      - "8080:80"                      # Nginx 端口映射
 
+# ======================== 命名卷（数据持久化） ========================
 volumes:
-  mysql_data:
-  influxdb_data:
+  mysql_data:       # MySQL 数据文件

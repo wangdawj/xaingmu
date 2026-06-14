@@ -1,8 +1,23 @@
-# 校园能耗监测平台 - Docker 一键启动脚本
-# 使用方法: 右键此文件 -> "使用 PowerShell 运行"，或在 PowerShell 中执行 .\start-docker.ps1
+# =============================================================================
+# 校园综合能耗监测平台 — Docker 一键部署脚本 (PowerShell)
+# =============================================================================
+# 功能:
+#   1. 启动 Docker Desktop
+#   2. 等待 Docker 引擎就绪
+#   3. 检查 Docker 镜像加速配置
+#   4. 执行 docker compose up -d 启动所有容器
+#
+# 使用方法:
+#   方式 1 (推荐): 右键此文件 -> "使用 PowerShell 运行"
+#   方式 2: 在 PowerShell 中执行 .\start-docker.ps1
+#
+# 前提条件: Docker Desktop 已安装在 E:\ZhouMIan\docker\
+# =============================================================================
 
+# 临时绕过当前进程的执行策略限制
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
+# Docker 路径配置
 $dockerExe = "E:\ZhouMIan\docker\resources\bin\docker.exe"
 $dockerDesktop = "E:\ZhouMIan\docker\Docker Desktop.exe"
 
@@ -11,7 +26,7 @@ Write-Host "  校园能耗监测平台 - Docker 部署" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# 1. 启动 Docker Desktop
+# ======================== 步骤 1：启动 Docker Desktop ========================
 Write-Host "[1/4] 启动 Docker Desktop..." -ForegroundColor Yellow
 $dockerProcess = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
 if (-not $dockerProcess) {
@@ -19,9 +34,9 @@ if (-not $dockerProcess) {
     Write-Host "  Docker Desktop 正在启动，等待引擎就绪..."
 }
 
-# 2. 等待 Docker 引擎
+# ======================== 步骤 2：等待 Docker 引擎就绪 ========================
 Write-Host "[2/4] 等待 Docker 引擎就绪..." -ForegroundColor Yellow
-$maxWait = 120
+$maxWait = 120      # 最大等待 120 秒
 $waited = 0
 do {
     Start-Sleep -Seconds 5
@@ -36,7 +51,7 @@ do {
 } while (-not $ready)
 Write-Host "  Docker 引擎已就绪!" -ForegroundColor Green
 
-# 3. 配置镜像加速（如需要）
+# ======================== 步骤 3：检查镜像加速配置 ========================
 Write-Host "[3/4] 检查镜像配置..." -ForegroundColor Yellow
 $daemonFile = "$env:USERPROFILE\.docker\daemon.json"
 if (Test-Path $daemonFile) {
@@ -48,7 +63,7 @@ if (Test-Path $daemonFile) {
     }
 }
 
-# 4. 启动项目
+# ======================== 步骤 4：执行 docker compose up ========================
 Write-Host "[4/4] 启动项目容器..." -ForegroundColor Yellow
 Push-Location "E:\develop\workspace\xiangmu"
 Write-Host "  执行: docker compose up -d"
@@ -58,6 +73,7 @@ Write-Host ""
 
 Pop-Location
 
+# ======================== 启动成功提示 ========================
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  启动完成！" -ForegroundColor Green

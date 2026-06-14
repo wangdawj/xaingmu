@@ -6,106 +6,127 @@
 
 | 层级 | 技术 |
 |------|------|
-| 采集 | Kafka + Flume + OPC UA |
-| 存储 | InfluxDB（时序）+ MySQL（业务）+ HDFS/Hive（离线） |
-| 处理 | Spark + Flink + Python Pandas |
-| 建模 | Scikit-learn / TensorFlow |
-| 展示 | Vue 3 + ECharts |
-| 部署 | Docker Compose |
+| 采集 | Kafka（模拟传感器 → Topic → Consumer） |
+| 存储 | MySQL 8.0（业务数据 + 时序能耗） |
+| 处理 | Python Pandas（清洗） + Kafka Consumer（实时流转） |
+docker exec campus-pipeline python /app/data-pipeline/cleaning/run_mysql_cleaning.py 2>&1
+| 建模 | Scikit-learn（线性回归 + 随机森林预测） |
+docker exec campus-backend python ml/prediction/energy_forecast.py
+| 展示 | Vue 3 + ECharts + Element Plus |
+| 部署 | Docker Compose（6 服务一键编排） |
 
 ## 项目结构
 
 ```
 ├── backend/                 # Flask API 服务
-├── frontend/                # Vue 3 可视化前端
-├── data-pipeline/           # 数据采集、清洗、预警、质检
-│   ├── collector/           # Kafka 采集与 InfluxDB 写入
-│   ├── cleaning/            # Pandas 数据清洗与异常检测
-│   ├── alert/               # 实时预警引擎
-│   └── quality/             # 数据质量巡检
-├── database/                # 建表脚本
-│   ├── mysql/
-│   ├── influxdb/
-│   └── hive/
-├── ml/prediction/           # 能耗预测模型
-└── docker-compose.yml
+│   ├── routes/              # 路由：energy（能耗 API 蓝图）
+│   ├── services/            # 能耗数据查询服务封装
+│   ├── models/              # SQLAlchemy 数据模型
+│   └── scripts/             # 种子数据生成脚本
+├── frontend/                # Vue 3 可视化前端 (Vite 构建)
+│   ├── src/views/           # Dashboard / BuildingDetail
+│   └── src/components/      # ECharts 图表组件 + 校园拓扑图
+├── data-pipeline/           # 数据管道（独立容器运行）
+│   ├── run_all.py             # 统一启动器（Producer + Consumer + Alert）
+│   ├── collector/             # Kafka Producer（模拟传感器）+ Consumer（写入 MySQL）
+│   ├── cleaning/              # Pandas 数据清洗与异常检测
+│   ├── alert/                 # 实时预警引擎（规则阈值 + 滑动窗口）
+│   └── quality/               # 数据质量巡检（缺失/延迟/一致性校验）
+├── database/mysql/          # MySQL 建表脚本与初始化数据
+├── ml/prediction/           # 能耗预测模型（线性回归 + 随机森林）
+├── docker-compose.yml       # 6 服务编排文件
+└── docs/architecture.md     # 系统架构说明书
 ```
 
 ## 快速启动
 
-### 1. 启动基础设施
+### 方式一：Docker 一键部署
 
 ```bash
-docker compose up -d mysql influxdb kafka zookeeper
+# 1. 启动所有服务
+docker compose up -d
+
+# 2. 写入种子数据（可选，用于填充历史图表）
+docker exec campus-backend python scripts/seed_mysql.py
 ```
 
-### 2. 初始化 InfluxDB 示例数据
+访问 **http://localhost:8080**
+
+### 方式二：查看运行状态
 
 ```bash
-pip install influxdb-client
-python database/influxdb/setup.py
+# 查看所有容器
+docker compose ps
+
+# 查看数据管道日志
+docker logs -f campus-pipeline
 ```
 
-### 3. 启动后端
+## 核心数据流
 
-```bash
-cd backend
-pip install -r requirements.txt
-python app.py
 ```
+传感器模拟器 ──每秒发数据──▶ Kafka ──消费──▶ MySQL energy_record
+                                   │
+                                   └──▶ 预警引擎 ──▶ MySQL alert_record
 
-### 4. 启动前端
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-访问 http://localhost:5173 ，默认账号 `admin` / `admin123`
-
-### 5. 启动数据管道（可选）
-
-```bash
-# 终端1: 模拟数据采集
-python data-pipeline/collector/kafka_producer.py
-
-# 终端2: Kafka -> InfluxDB
-python data-pipeline/collector/kafka_to_influx.py
-
-# 终端3: 实时预警
-python data-pipeline/alert/realtime_alert.py
-
-# 数据质量巡检
-python data-pipeline/quality/quality_inspector.py
+Flask API ◀── 查询 MySQL ──▶ Vue + ECharts 大屏展示
 ```
 
 ## API 接口
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | /api/auth/login | 用户登录 |
-| GET | /api/energy/trend | 能耗趋势 |
-| GET | /api/energy/comparison | 楼宇对比 |
-| GET | /api/energy/peak-valley | 峰谷占比 |
-| GET | /api/energy/heatmap | 热力图 |
-| GET | /api/energy/alerts | 预警统计 |
-| GET | /api/energy/advice | 节能建议 |
-| GET | /api/energy/quality/logs | 质检日志 |
+| GET | /api/health | 健康检查 |
+| GET | /api/energy/buildings | 建筑列表 |
+| GET | /api/energy/building/{id}/detail | 建筑详情 + 24h 用电曲线 |
+| GET | /api/energy/trend | 能耗趋势（按小时聚合） |
+| GET | /api/energy/comparison | 楼宇能耗对比 |
+| GET | /api/energy/peak-valley | 峰谷时段占比 |
+| GET | /api/energy/heatmap | 区域 × 建筑能耗热力图 |
+| GET | /api/energy/alerts | 预警记录与统计 |
+| GET | /api/energy/advice | 节能建议列表 |
+| GET | /api/energy/quality/logs | 数据质检日志 |
 
-## 已完成模块
+## 数据库核心表
 
-- MySQL / InfluxDB / Hive 建表与初始化数据
-- 5 类 ECharts 可视化图表
-- Flask REST API + JWT 用户权限
-- Kafka 数据采集 → InfluxDB 写入链路
-- Pandas 数据清洗与异常检测
-- 实时预警引擎（Kafka 消费 + MySQL 告警入库）
-- 数据质量巡检（缺失/延迟/一致性）
-- Scikit-learn 能耗预测模型
+| 表名 | 说明 |
+|------|------|
+| `building` | 建筑基础信息（名称、类型、面积、开放时间） |
+| `meter` | 仪表设备（电表/水表/气表，关联建筑） |
+| `energy_record` | 能耗时序数据（功率、电压、电流，按秒写入） |
+| `energy_sub_record` | 分项能耗（照明/空调/插座） |
+| `alert_rule` | 告警规则配置（阈值、级别） |
+| `alert_record` | 告警记录（触发值、状态、时间） |
+| `energy_saving_advice` | 节能决策建议 |
+| `energy_daily_summary` | 日能耗汇总统计 |
+| `data_quality_log` | 数据质量巡检日志 |
 
-## 扩展说明
+查询语句见 `database/mysql/queries.sql`。
 
-- 新增楼宇：在 `building` 表插入记录并配置对应 `meter`
-- 新增告警规则：在 `alert_rule` 表配置阈值
-- Hive 离线分析：将 Kafka 数据归档至 HDFS 后执行 Hive SQL
+## 可视化大屏
+
+| 区域 | 内容 |
+|------|------|
+| 统计卡片 | 总能耗 / 运行建筑数 / 告警数 / 碳减排量 |
+| 校园拓扑图 | SVG 地图，按建筑状态着色（绿色/橙色/红色） |
+| 热力图 | 区域 × 建筑的能耗强度矩阵 |
+| 峰谷图 | 峰时段（8-22 点）与谷时段用电占比环形图 |
+| 预警统计 | 按严重级别（信息/警告/严重）的告警数量柱状图 |
+| 楼宇对比 | 六栋建筑实时功率排行柱状图 |
+| 节能建议 | 按优先级排序的节能措施列表 |
+
+## 预警机制
+
+采用双重策略进行异常检测：
+
+1. **规则阈值**：管理员预设功率上限，超过则告警
+2. **滑动窗口**：当前值与近 20 条历史均值比较，突增超过 2 倍则告警
+
+告警按严重级别分为信息（info）、警告（warning）、严重（critical）三级。
+
+## 扩展方向
+
+- 对接真实 OPC UA / Modbus 工业协议电表
+- 引入天气、课表数据提升预测精度
+- 手机端告警推送（钉钉/微信）
+- 升级至 Flink 实时流处理引擎

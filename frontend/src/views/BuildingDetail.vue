@@ -1,147 +1,77 @@
+<!--
+  建筑详情页
+  =========
+  展示单体建筑完整信息：基本信息 / 24h 曲线 / 分项能耗 / 历史环比
+-->
 <template>
-  <div class="building-detail">
+  <div class="detail" v-loading="loading">
     <!-- 顶栏 -->
-    <header class="header">
-      <el-button link type="primary" @click="$router.push('/')" class="back-btn">
-        <el-icon><ArrowLeft /></el-icon> 返回总览
-      </el-button>
-      <h1 class="header-title">{{ info.building_name || '加载中...' }}</h1>
-      <el-tag size="small" :type="statusType" effect="plain">{{ statusLabel }}</el-tag>
+    <header class="top-bar">
+      <el-button link @click="$router.push('/')">← 返回总览</el-button>
+      <h1>{{ info.building_name || '加载中...' }}</h1>
+      <el-tag size="small" :type="stType">{{ stLabel }}</el-tag>
     </header>
 
     <!-- 基本信息 -->
-    <el-row :gutter="16" class="info-row">
-      <el-col :span="6">
-        <div class="info-card">
-          <div class="info-card__label">建筑类型</div>
-          <div class="info-card__value">{{ info.building_type || '-' }}</div>
-        </div>
-      </el-col>
-      <el-col :span="6">
-        <div class="info-card">
-          <div class="info-card__label">建筑面积</div>
-          <div class="info-card__value">{{ info.build_area || 0 }} <small>m²</small></div>
-        </div>
-      </el-col>
-      <el-col :span="6">
-        <div class="info-card">
-          <div class="info-card__label">楼层数</div>
-          <div class="info-card__value">{{ info.floor_count || 0 }} <small>层</small></div>
-        </div>
-      </el-col>
-      <el-col :span="6">
-        <div class="info-card">
-          <div class="info-card__label">容纳人数</div>
-          <div class="info-card__value">{{ info.max_occupancy || '-' }} <small>人</small></div>
-        </div>
-      </el-col>
+    <el-row :gutter="12" class="info-row">
+      <el-col :span="6"><div class="info-card"><div class="info-label">建筑类型</div><div class="info-val">{{ info.building_type || '-' }}</div></div></el-col>
+      <el-col :span="6"><div class="info-card"><div class="info-label">建筑面积</div><div class="info-val">{{ info.build_area || 0 }} <small>m²</small></div></div></el-col>
+      <el-col :span="6"><div class="info-card"><div class="info-label">楼层数</div><div class="info-val">{{ info.floor_count || 0 }} <small>层</small></div></div></el-col>
+      <el-col :span="6"><div class="info-card"><div class="info-label">容纳人数</div><div class="info-val">{{ info.max_occupancy || '-' }} <small>人</small></div></div></el-col>
     </el-row>
 
     <!-- 能耗摘要 -->
-    <el-row :gutter="16" class="summary-row">
+    <el-row :gutter="12" class="sum-row">
       <el-col :span="8">
-        <div class="summary-card summary-card--blue">
-          <svg viewBox="0 0 32 32" width="24" height="24" class="summary-card__icon"><path d="M13 4L5 14h6v14h4V14h6L13 4z" fill="var(--primary)"/></svg>
-          <div class="summary-card__info">
-            <div class="summary-card__label">24h 总用电量</div>
-            <div class="summary-card__value">{{ fmtNum(summary.total) }} <small>kWh</small></div>
-          </div>
-        </div>
+        <div class="sum-card blue"><span class="sum-icon">⚡</span><div><div class="sum-label">24h 总用电</div><div class="sum-val">{{ fmt(summary.total) }} <small>kWh</small></div></div></div>
       </el-col>
       <el-col :span="8">
-        <div class="summary-card summary-card--orange">
-          <svg viewBox="0 0 32 32" width="24" height="24"><polyline points="4,26 10,18 16,22 22,10 28,6" fill="none" stroke="var(--warning)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10" cy="18" r="2" fill="var(--warning)"/><circle cx="22" cy="10" r="2" fill="var(--warning)"/></svg>
-          <div class="summary-card__info">
-            <div class="summary-card__label">峰值功率</div>
-            <div class="summary-card__value">{{ fmtNum(summary.peak) }} <small>kW</small></div>
-          </div>
-        </div>
+        <div class="sum-card orange"><span class="sum-icon">📈</span><div><div class="sum-label">峰值功率</div><div class="sum-val">{{ fmt(summary.peak) }} <small>kW</small></div></div></div>
       </el-col>
       <el-col :span="8">
-        <div class="summary-card summary-card--green">
-          <svg viewBox="0 0 32 32" width="24" height="24"><rect x="4" y="6" width="24" height="20" rx="2" fill="none" stroke="var(--success)" stroke-width="2"/><line x1="12" y1="14" x2="12" y2="14" stroke="var(--success)" stroke-width="8" stroke-linecap="round"/><line x1="17" y1="18" x2="17" y2="18" stroke="var(--success)" stroke-width="8" stroke-linecap="round"/><line x1="22" y1="11" x2="22" y2="11" stroke="var(--success)" stroke-width="8" stroke-linecap="round"/></svg>
-          <div class="summary-card__info">
-            <div class="summary-card__label">平均功率</div>
-            <div class="summary-card__value">{{ fmtNum(summary.avg) }} <small>kW</small></div>
-          </div>
-        </div>
+        <div class="sum-card green"><span class="sum-icon">📊</span><div><div class="sum-label">平均功率</div><div class="sum-val">{{ fmt(summary.avg) }} <small>kW</small></div></div></div>
       </el-col>
     </el-row>
 
-    <!-- 24h 曲线 + 分项能耗 -->
-    <el-row :gutter="16" class="chart-row">
+    <!-- 图表行1：24h曲线 + 分项能耗 -->
+    <el-row :gutter="12" class="chart-row">
       <el-col :span="16">
-        <el-card shadow="never" class="chart-card">
-          <template #header>
-            <div class="card-header">
-              <span class="card-header__title">24 小时用电曲线</span>
-              <el-tag size="small" type="info">数据粒度为小时</el-tag>
-            </div>
-          </template>
-          <div ref="curveChartRef" class="chart-container"></div>
+        <el-card shadow="never">
+          <template #header>24 小时用电曲线</template>
+          <div ref="crv" class="chart-box"></div>
         </el-card>
       </el-col>
       <el-col :span="8">
-        <el-card shadow="never" class="chart-card">
-          <template #header><span class="card-header__title">分项能耗占比</span></template>
-          <div ref="subChartRef" class="sub-chart-container"></div>
+        <el-card shadow="never">
+          <template #header>分项能耗占比</template>
+          <div ref="sub" class="chart-box" style="height:340px"></div>
         </el-card>
       </el-col>
     </el-row>
 
-    <!-- 历史环比 -->
-    <el-card shadow="never" class="comparison-card" v-if="comparison.today != null">
-      <template #header><span>历史环比</span></template>
-      <el-row :gutter="16">
-        <el-col :span="6">
-          <div class="comp-item">
-            <div class="comp-item__label">今日用电</div>
-            <div class="comp-item__value">{{ fmtNum(comparison.today) }} kWh</div>
-          </div>
-        </el-col>
-        <el-col :span="6">
-          <div class="comp-item">
-            <div class="comp-item__label">昨日用电</div>
-            <div class="comp-item__value">{{ fmtNum(comparison.yesterday) }} kWh</div>
-            <div class="comp-item__change" :class="comparison.day_change > 0 ? 'up' : 'down'" v-if="comparison.day_change != null">
-              {{ comparison.day_change > 0 ? '+' : '' }}{{ comparison.day_change }}%
-            </div>
-          </div>
-        </el-col>
-        <el-col :span="6">
-          <div class="comp-item">
-            <div class="comp-item__label">本周累计</div>
-            <div class="comp-item__value">{{ fmtNum(comparison.this_week) }} kWh</div>
-          </div>
-        </el-col>
-        <el-col :span="6">
-          <div class="comp-item">
-            <div class="comp-item__label">上周累计</div>
-            <div class="comp-item__value">{{ fmtNum(comparison.last_week) }} kWh</div>
-            <div class="comp-item__change" :class="comparison.week_change > 0 ? 'up' : 'down'" v-if="comparison.week_change != null">
-              {{ comparison.week_change > 0 ? '+' : '' }}{{ comparison.week_change }}%
-            </div>
-          </div>
-        </el-col>
+    <!-- 历史环比（仅数据存在时显示） -->
+    <el-card shadow="never" class="comp-card" v-if="comp.today != null">
+      <template #header>历史环比</template>
+      <el-row :gutter="12">
+        <el-col :span="6"><div class="comp-item"><div class="comp-label">今日用电</div><div class="comp-val">{{ fmt(comp.today) }} kWh</div></div></el-col>
+        <el-col :span="6"><div class="comp-item"><div class="comp-label">昨日用电</div><div class="comp-val">{{ fmt(comp.yesterday) }} kWh</div><div class="comp-chg" :class="comp.day_change>0?'up':'down'" v-if="comp.day_change!=null">{{ comp.day_change>0?'+':'' }}{{ comp.day_change }}%</div></div></el-col>
+        <el-col :span="6"><div class="comp-item"><div class="comp-label">本周累计</div><div class="comp-val">{{ fmt(comp.this_week) }} kWh</div></div></el-col>
+        <el-col :span="6"><div class="comp-item"><div class="comp-label">上周累计</div><div class="comp-val">{{ fmt(comp.last_week) }} kWh</div><div class="comp-chg" :class="comp.week_change>0?'up':'down'" v-if="comp.week_change!=null">{{ comp.week_change>0?'+':'' }}{{ comp.week_change }}%</div></div></el-col>
       </el-row>
     </el-card>
 
     <!-- 节能建议 -->
-    <el-card shadow="never" class="advice-card" v-if="adviceList.length > 0">
-      <template #header><span>节能建议</span></template>
+    <el-card shadow="never" v-if="adviceList.length" class="advice-card">
+      <template #header>节能建议</template>
       <el-table :data="adviceList" stripe size="small">
-        <el-table-column prop="title" label="建议" min-width="180" />
-        <el-table-column prop="content" label="具体内容" min-width="300" />
+        <el-table-column prop="title" label="建议" min-width="160" />
+        <el-table-column prop="content" label="具体内容" min-width="260" show-overflow-tooltip />
         <el-table-column prop="estimated_save" label="预估节能" width="100" align="center">
-          <template #default="{ row }">
-            <span class="save-tag">{{ row.estimated_save }}%</span>
-          </template>
+          <template #default="{row}"><span class="save-pct">{{ row.estimated_save }}%</span></template>
         </el-table-column>
-        <el-table-column prop="priority" label="优先级" width="90" align="center">
-          <template #default="{ row }">
-            <el-tag :type="row.priority === 'high' ? 'danger' : 'warning'" size="small">
-              {{ row.priority === 'high' ? '高' : '中' }}
-            </el-tag>
+        <el-table-column prop="priority" label="优先级" width="80" align="center">
+          <template #default="{row}">
+            <el-tag :type="row.priority==='high'?'danger':'warning'" size="small">{{ row.priority==='high'?'高':'中' }}</el-tag>
           </template>
         </el-table-column>
       </el-table>
@@ -156,185 +86,132 @@ import * as echarts from 'echarts'
 import api from '../api'
 
 const route = useRoute()
-const curveChartRef = ref(null)
-const subChartRef = ref(null)
-let curveChart = null
-let subChart = null
+const crv = ref(null)
+const sub = ref(null)
+let c1 = null, c2 = null
 
+const loading = ref(false)
 const info = ref({})
 const summary = ref({ total: 0, peak: 0, avg: 0 })
 const adviceList = ref([])
-const comparison = ref({ today: null, yesterday: 0, this_week: 0, last_week: 0, day_change: null, week_change: null })
+const comp = ref({ today: null, yesterday: 0, this_week: 0, last_week: 0, day_change: null, week_change: null })
 
-const statusType = computed(() => {
-  if (summary.value.peak > 200) return 'danger'
-  if (summary.value.peak > 100) return 'warning'
-  return 'success'
-})
-const statusLabel = computed(() => {
-  if (summary.value.peak > 200) return '高负荷'
-  if (summary.value.peak > 100) return '中等'
-  return '正常'
-})
+const stType = computed(() => summary.value.peak > 200 ? 'danger' : summary.value.peak > 100 ? 'warning' : 'success')
+const stLabel = computed(() => summary.value.peak > 200 ? '高负荷' : summary.value.peak > 100 ? '中等' : '正常')
 
-function fmtNum(v) {
-  if (v == null) return '0'
+function fmt(v) {
+  if (v == null || isNaN(v)) return '0'
   return Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 1 })
 }
 
-async function loadData() {
-  const buildingId = route.params.buildingId
-  const [detail, advice, subRes, compRes] = await Promise.allSettled([
-    api.get(`/energy/building/${buildingId}/detail`),
-    api.get(`/energy/advice?building_id=${buildingId}`),
-    api.get(`/energy/building/${buildingId}/sub-items`),
-    api.get(`/energy/building/${buildingId}/comparison`),
+async function load() {
+  loading.value = true
+  const bid = route.params.buildingId
+  const [d, a, s, c] = await Promise.allSettled([
+    api.get(`/energy/building/${bid}/detail`),
+    api.get(`/energy/advice?building_id=${bid}`),
+    api.get(`/energy/building/${bid}/sub-items`),
+    api.get(`/energy/building/${bid}/comparison`),
   ])
-
-  if (detail.status === 'fulfilled' && detail.value.data.code === 0) {
-    const d = detail.value.data.data
-    info.value = d
-    summary.value = d.summary
-    renderCurveChart(d.curve)
+  if (d.status === 'fulfilled' && d.value.data.code === 0) {
+    const dt = d.value.data.data
+    info.value = dt; summary.value = dt.summary
+    renderCurve(dt.curve)
   }
-  if (advice.status === 'fulfilled') {
-    adviceList.value = advice.value.data.data || []
-  }
-  if (subRes.status === 'fulfilled' && subRes.value.data.code === 0) {
-    renderSubChart(subRes.value.data.data || [])
-  }
-  if (compRes.status === 'fulfilled' && compRes.value.data.code === 0) {
-    comparison.value = compRes.value.data.data
-  }
+  if (a.status === 'fulfilled') adviceList.value = a.value.data.data || []
+  if (s.status === 'fulfilled' && s.value.data.code === 0) renderSub(s.value.data.data || [])
+  if (c.status === 'fulfilled' && c.value.data.code === 0) comp.value = c.value.data.data
+  loading.value = false
 }
 
-function renderCurveChart(curve) {
-  if (!curveChartRef.value) return
-  if (!curveChart) {
-    curveChart = echarts.init(curveChartRef.value)
-  }
-  const times = curve.map(c => c.time)
-  const values = curve.map(c => c.value)
-  curveChart.setOption({
+function renderCurve(curve) {
+  if (!crv.value) return
+  if (!c1) c1 = echarts.init(crv.value)
+  const times = curve.map(d => d.time)
+  const vals = curve.map(d => d.value)
+  c1.setOption({
     tooltip: { trigger: 'axis' },
     xAxis: { type: 'category', data: times, axisLabel: { rotate: 45, fontSize: 10 } },
     yAxis: { type: 'value', name: 'kW' },
     dataZoom: [{ type: 'inside' }, { type: 'slider', height: 20, bottom: 6 }],
     series: [{
-      type: 'line',
-      data: values,
-      smooth: true,
+      type: 'line', data: vals, smooth: true,
       areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
         { offset: 0, color: 'rgba(24,144,255,.35)' }, { offset: 1, color: 'rgba(24,144,255,.02)' }
       ])},
       lineStyle: { color: '#1890ff', width: 2 },
       itemStyle: { color: '#1890ff' },
-      markLine: {
-        silent: true,
-        data: [{ type: 'average', name: '均值', label: { formatter: '均值 {c} kW' } }],
-        lineStyle: { color: '#faad14', type: 'dashed' }
-      }
+      markLine: { silent: true, data: [{ type: 'average', name: '均值', label: { formatter: '均值 {c} kW' } }], lineStyle: { color: '#faad14', type: 'dashed' } },
     }],
     grid: { left: 50, right: 20, top: 30, bottom: 50 },
   })
 }
 
-function renderSubChart(subItems) {
-  if (!subChartRef.value) return
-  if (!subChart) {
-    subChart = echarts.init(subChartRef.value)
-  }
-  const pieData = subItems.map(s => ({ name: s.label, value: s.value }))
-  subChart.setOption({
+function renderSub(items) {
+  if (!sub.value) return
+  if (!c2) c2 = echarts.init(sub.value)
+  c2.setOption({
     tooltip: { trigger: 'item', formatter: '{b}: {c} kWh ({d}%)' },
     legend: { bottom: 0, textStyle: { fontSize: 11 } },
     series: [{
-      type: 'pie',
-      radius: ['45%', '72%'],
-      center: ['50%', '45%'],
-      data: pieData,
+      type: 'pie', radius: ['45%', '72%'], center: ['50%', '45%'],
+      data: items.map(s => ({ name: s.label, value: s.value })),
       label: { formatter: '{b}\n{d}%', fontSize: 11 },
-      itemStyle: {
-        color: (p) => ['#1890ff', '#fa8c16', '#52c41a'][p.dataIndex % 3],
-      },
-      emphasis: {
-        itemStyle: { shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0,0,0,.3)' }
-      }
+      itemStyle: { color: (p) => ['#1890ff', '#fa8c16', '#52c41a'][p.dataIndex % 3] },
+      emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,.3)' } },
     }],
   })
 }
 
-function handleResize() {
-  curveChart?.resize()
-  subChart?.resize()
-}
+function handleResize() { c1?.resize(); c2?.resize() }
 
-onMounted(() => {
-  loadData()
-  window.addEventListener('resize', handleResize)
-})
-onUnmounted(() => {
-  window.removeEventListener('resize', handleResize)
-  curveChart?.dispose()
-  subChart?.dispose()
-})
+onMounted(() => { load(); window.addEventListener('resize', handleResize) })
+onUnmounted(() => { window.removeEventListener('resize', handleResize); c1?.dispose(); c2?.dispose() })
 </script>
 
 <style scoped>
-.building-detail { padding: 20px 24px; background: var(--bg); min-height: 100vh; }
-
-/* 顶栏 */
-.header {
+.detail { padding: 16px 20px; background: var(--bg); min-height: 100vh; }
+.top-bar {
   display: flex; justify-content: space-between; align-items: center;
-  height: 56px; padding: 0 20px; margin-bottom: 20px;
+  height: 50px; padding: 0 16px; margin-bottom: 14px;
   background: var(--card-bg); border-radius: var(--radius); box-shadow: var(--shadow);
 }
-.back-btn { font-size: 13px; }
-.header-title { font-size: 17px; font-weight: 600; color: var(--text); margin: 0; flex: 1; text-align: center; }
-
-/* 基本信息卡片 */
-.info-row { margin-bottom: 16px; }
+.top-bar h1 { font-size: 16px; font-weight: 600; margin: 0; color: var(--text); }
+.info-row { margin-bottom: 10px; }
 .info-card {
   background: var(--card-bg); border-radius: var(--radius);
-  box-shadow: var(--shadow); padding: 16px 20px;
-  transition: box-shadow .25s;
+  box-shadow: var(--shadow); padding: 14px 16px;
+  transition: box-shadow .2s;
 }
 .info-card:hover { box-shadow: var(--shadow-hover); }
-.info-card__label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
-.info-card__value { font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.2; }
-.info-card__value small { font-size: 13px; font-weight: 400; color: var(--text-secondary); }
+.info-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+.info-val { font-size: 20px; font-weight: 700; color: var(--text); line-height: 1.2; }
+.info-val small { font-size: 12px; font-weight: 400; color: var(--text-secondary); }
 
-/* 能耗摘要卡片 */
-.summary-row { margin-bottom: 16px; }
-.summary-card {
-  display: flex; align-items: center; gap: 14px;
-  padding: 18px 20px; border-radius: var(--radius);
+.sum-row { margin-bottom: 10px; }
+.sum-card {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px; border-radius: var(--radius);
   background: var(--card-bg); box-shadow: var(--shadow);
-  transition: box-shadow .25s, transform .25s;
+  transition: transform .2s, box-shadow .2s;
 }
-.summary-card:hover { box-shadow: var(--shadow-hover); transform: translateY(-2px); }
-.summary-card__icon { flex-shrink: 0; }
-.summary-card__label { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
-.summary-card__value { font-size: 26px; font-weight: 700; color: var(--text); line-height: 1.1; }
-.summary-card__value small { font-size: 13px; font-weight: 400; color: var(--text-secondary); }
+.sum-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-hover); }
+.sum-icon { font-size: 22px; flex-shrink: 0; }
+.sum-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 2px; }
+.sum-val { font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.1; }
+.sum-val small { font-size: 12px; font-weight: 400; color: var(--text-secondary); }
 
-/* 图表行 */
-.chart-row { margin-bottom: 16px; }
-.chart-card { height: 100%; }
-.card-header { display: flex; justify-content: space-between; align-items: center; }
-.card-header__title { font-weight: 600; }
-.chart-container { width: 100%; height: 400px; }
-.sub-chart-container { width: 100%; height: 360px; }
+.chart-row { margin-bottom: 10px; }
+.chart-box { width: 100%; height: 360px; }
 
-/* 历史环比 */
-.comparison-card { margin-bottom: 16px; }
-.comp-item { text-align: center; padding: 12px 0; }
-.comp-item__label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
-.comp-item__value { font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.2; }
-.comp-item__change { font-size: 13px; margin-top: 4px; font-weight: 600; }
-.comp-item__change.up { color: var(--danger); }
-.comp-item__change.down { color: var(--success); }
+.comp-card { margin-bottom: 10px; }
+.comp-item { text-align: center; padding: 8px 0; }
+.comp-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+.comp-val { font-size: 20px; font-weight: 700; color: var(--text); line-height: 1.2; }
+.comp-chg { font-size: 12px; margin-top: 2px; font-weight: 600; }
+.comp-chg.up { color: var(--danger); }
+.comp-chg.down { color: var(--success); }
 
-.advice-card { margin-bottom: 16px; }
-.save-tag { color: var(--success); font-weight: 600; }
+.advice-card { margin-bottom: 10px; }
+.save-pct { color: var(--success); font-weight: 600; }
 </style>

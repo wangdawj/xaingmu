@@ -1,160 +1,138 @@
-from config import Config
+"""
+能耗数据查询服务模块（MySQL 版）
+============================
+封装 MySQL 能耗时序数据查询，提供统一的能耗数据查询接口。
+替代原 InfluxDB 版本，所有查询改为标准 SQL。
+
+用法:
+    from flask import current_app
+    svc = EnergyQueryService(current_app.config)
+    data = svc.query_trend(hours=24)
+"""
+
+from sqlalchemy import text
 
 
-class InfluxService:
-    def __init__(self):
-        self.cfg = Config()
-        self._v3_client = None
-        self._v2_client = None
+class EnergyQueryService:
+    """能耗数据查询服务
 
-    def _is_v3(self):
-        return self.cfg.INFLUXDB_VERSION == "3"
+    支持的方法：
+        query_trend()              — 按小时聚合的能耗趋势
+        query_building_comparison()— 各建筑总能耗对比
+        query_peak_valley()        — 峰谷时段用电分析
+        query_heatmap()            — 区域×建筑能耗热力图
+        query_sub_items()          — 分项能耗（照明/空调/插座）
+        query_historical_comparison() — 历史环比（日/周）
+        classify_building()        — 建筑类型 → 分类标签 + 颜色
+    """
 
-    def _v3(self):
-        if self._v3_client is None:
-            from influxdb_client_3 import InfluxDBClient3
-            self._v3_client = InfluxDBClient3(
-                host=self.cfg.INFLUXDB_URL,
-                token=self.cfg.INFLUXDB_TOKEN,
-                database=self.cfg.INFLUXDB_BUCKET,
-                auth_scheme="Bearer",
-            )
-        return self._v3_client
+    # 建筑类型 → 拓扑图分类 & 颜色映射
+    BUILDING_CATEGORY_MAP = {
+        "教学": ("academic", "#1890ff"),
+        "办公": ("office", "#52c41a"),
+        "宿舍": ("dormitory", "#fa8c16"),
+        "食堂": ("canteen", "#f5222d"),
+        "图书馆": ("library", "#722ed1"),
+    }
 
-    def _v2(self):
-        if self._v2_client is None:
-            from influxdb_client import InfluxDBClient
-            self._v2_client = InfluxDBClient(
-                url=self.cfg.INFLUXDB_URL,
-                token=self.cfg.INFLUXDB_TOKEN,
-                org=self.cfg.INFLUXDB_ORG,
-            )
-        return self._v2_client
+    def __init__(self, config: dict = None):
+        """初始化服务（config 参数保留兼容，实际从 Flask db 获取连接）"""
+        self._config = config or {}
 
-    def _query_v3(self, sql: str):
-        table = self._v3().query(query=sql, language="sql")
-        return table.to_pylist()
+    # ---------- 上下文管理器 ----------
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    # ---------- 内部查询方法 ----------
+
+    def _db(self):
+        """获取 SQLAlchemy db 实例（延迟导入避免循环依赖）"""
+        from extensions import db
+        return db
+
+    def _query(self, sql: str, params: dict = None):
+        """执行原生 SQL 查询，返回字典列表"""
+        result = self._db().session.execute(text(sql), params or {})
+        rows = result.fetchall()
+        columns = result.keys()
+        return [dict(zip(columns, row)) for row in rows]
+
+    # ---------- 静态工具方法 ----------
+
+    @staticmethod
+    def classify_building(building_type: str):
+        """根据建筑类型名称返回拓扑图分类标签和颜色"""
+        for key, val in EnergyQueryService.BUILDING_CATEGORY_MAP.items():
+            if key in building_type:
+                return val
+        return ("default", "#909399")
+
+    def close(self):
+        """关闭连接（MySQL 由 SQLAlchemy 连接池管理，无需手动关闭）"""
+        pass
+
+    # ---------- 能耗趋势 ----------
 
     def query_trend(self, hours: int = 24, building_id: str = None):
-        if self._is_v3():
-            where = f"AND building_id = '{building_id}'" if building_id else ""
-            rows = self._query_v3(f"""
-                SELECT date_bin(interval '1 hour', time) AS time,
-                       building_id,
-                       AVG(value) AS value
-                FROM electricity_data
-                WHERE time > now() - interval '{hours} hours' {where}
-                GROUP BY 1, 2
-                ORDER BY time
-            """)
-            return [{
-                "time": str(r["time"]),
-                "value": round(float(r["value"]), 2),
-                "building_id": r.get("building_id", ""),
-            } for r in rows if r.get("value") is not None]
-
-        filter_clause = ""
+        """按小时聚合的能耗趋势曲线"""
+        where = ""
+        params = {"hours": hours}
         if building_id:
-            filter_clause = f'|> filter(fn: (r) => r["building_id"] == "{building_id}")'
-        flux = f'''
-        from(bucket: "{self.cfg.INFLUXDB_BUCKET}")
-          |> range(start: -{hours}h)
-          |> filter(fn: (r) => r["_measurement"] == "electricity_data")
-          |> filter(fn: (r) => r["_field"] == "value")
-          {filter_clause}
-          |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
-        '''
-        tables = self._v2().query_api().query(flux, org=self.cfg.INFLUXDB_ORG)
-        result = []
-        for table in tables:
-            for record in table.records:
-                result.append({
-                    "time": record.get_time().isoformat(),
-                    "value": round(float(record.get_value()), 2),
-                    "building_id": record.values.get("building_id", ""),
-                })
-        return result
+            where = "AND building_id = :building_id"
+            params["building_id"] = building_id
+
+        sql = f"""
+            SELECT
+                DATE_FORMAT(event_time, '%Y-%m-%d %H:00:00') AS time,
+                building_id,
+                ROUND(AVG(value), 2) AS value
+            FROM energy_record
+            WHERE event_time >= NOW() - INTERVAL :hours HOUR
+              {where}
+            GROUP BY time, building_id
+            ORDER BY time
+        """
+        rows = self._query(sql, params)
+        return [{
+            "time": r["time"],
+            "value": float(r["value"]),
+            "building_id": r["building_id"],
+        } for r in rows if r.get("value") is not None]
+
+    # ---------- 建筑对比 ----------
 
     def query_building_comparison(self, hours: int = 24):
-        if self._is_v3():
-            rows = self._query_v3(f"""
-                SELECT building_id, SUM(value) AS total
-                FROM electricity_data
-                WHERE time > now() - interval '{hours} hours'
-                GROUP BY building_id
-                ORDER BY total DESC
-            """)
-            return [{
-                "building_id": r["building_id"],
-                "total": round(float(r["total"]), 2),
-            } for r in rows]
+        """各建筑总能耗对比，降序排列"""
+        sql = """
+            SELECT building_id, ROUND(SUM(value), 2) AS total
+            FROM energy_record
+            WHERE event_time >= NOW() - INTERVAL :hours HOUR
+            GROUP BY building_id
+            ORDER BY total DESC
+        """
+        rows = self._query(sql, {"hours": hours})
+        return [{
+            "building_id": r["building_id"],
+            "total": float(r["total"]),
+        } for r in rows]
 
-        flux = f'''
-        from(bucket: "{self.cfg.INFLUXDB_BUCKET}")
-          |> range(start: -{hours}h)
-          |> filter(fn: (r) => r["_measurement"] == "electricity_data")
-          |> filter(fn: (r) => r["_field"] == "value")
-          |> group(columns: ["building_id"])
-          |> sum()
-        '''
-        tables = self._v2().query_api().query(flux, org=self.cfg.INFLUXDB_ORG)
-        result = []
-        for table in tables:
-            for record in table.records:
-                result.append({
-                    "building_id": record.values.get("building_id", ""),
-                    "total": round(float(record.get_value()), 2),
-                })
-        return sorted(result, key=lambda x: x["total"], reverse=True)
+    # ---------- 峰谷分析 ----------
 
     def query_peak_valley(self, hours: int = 24):
-        if self._is_v3():
-            rows = self._query_v3(f"""
-                SELECT date_bin(interval '1 hour', time) AS time, AVG(value) AS value
-                FROM electricity_data
-                WHERE time > now() - interval '{hours} hours'
-                GROUP BY 1
-                ORDER BY time
-            """)
-            peak, valley = 0.0, 0.0
-            for r in rows:
-                if r.get("value") is None:
-                    continue
-                val = float(r["value"])
-                hour_str = str(r["time"])
-                try:
-                    hour = int(hour_str[11:13])
-                except (ValueError, IndexError):
-                    hour = 12
-                if 8 <= hour < 22:
-                    peak += val
-                else:
-                    valley += val
-            total = peak + valley or 1
-            return {
-                "peak": round(peak, 2),
-                "valley": round(valley, 2),
-                "peak_ratio": round(peak / total * 100, 1),
-                "valley_ratio": round(valley / total * 100, 1),
-            }
-
-        flux = f'''
-        from(bucket: "{self.cfg.INFLUXDB_BUCKET}")
-          |> range(start: -{hours}h)
-          |> filter(fn: (r) => r["_measurement"] == "electricity_data")
-          |> filter(fn: (r) => r["_field"] == "value")
-          |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
-        '''
-        tables = self._v2().query_api().query(flux, org=self.cfg.INFLUXDB_ORG)
-        peak, valley = 0.0, 0.0
-        for table in tables:
-            for record in table.records:
-                hour = record.get_time().hour
-                val = float(record.get_value())
-                if 8 <= hour < 22:
-                    peak += val
-                else:
-                    valley += val
+        """峰时段(8-22点) vs 谷时段(22-次日8点)"""
+        sql = """
+            SELECT HOUR(event_time) AS h, SUM(value) AS total
+            FROM energy_record
+            WHERE event_time >= NOW() - INTERVAL :hours HOUR
+            GROUP BY h
+        """
+        rows = self._query(sql, {"hours": hours})
+        peak = sum(float(r["total"]) for r in rows if 8 <= int(r["h"]) < 22)
+        valley = sum(float(r["total"]) for r in rows if int(r["h"]) < 8 or int(r["h"]) >= 22)
         total = peak + valley or 1
         return {
             "peak": round(peak, 2),
@@ -163,104 +141,58 @@ class InfluxService:
             "valley_ratio": round(valley / total * 100, 1),
         }
 
-    def query_heatmap(self, hours: int = 24):
-        if self._is_v3():
-            rows = self._query_v3(f"""
-                SELECT building_id, region_id, AVG(value) AS value
-                FROM electricity_data
-                WHERE time > now() - interval '{hours} hours'
-                GROUP BY building_id, region_id
-            """)
-            return [{
-                "building_id": r["building_id"],
-                "region_id": r["region_id"],
-                "value": round(float(r["value"]), 2),
-            } for r in rows if r.get("value") is not None]
+    # ---------- 热力图 ----------
 
-        flux = f'''
-        from(bucket: "{self.cfg.INFLUXDB_BUCKET}")
-          |> range(start: -{hours}h)
-          |> filter(fn: (r) => r["_measurement"] == "electricity_data")
-          |> filter(fn: (r) => r["_field"] == "value")
-          |> group(columns: ["building_id", "region_id"])
-          |> mean()
-        '''
-        tables = self._v2().query_api().query(flux, org=self.cfg.INFLUXDB_ORG)
-        result = []
-        for table in tables:
-            for record in table.records:
-                result.append({
-                    "building_id": record.values.get("building_id", ""),
-                    "region_id": record.values.get("region_id", ""),
-                    "value": round(float(record.get_value()), 2),
-                })
-        return result
+    def query_heatmap(self, hours: int = 24):
+        """区域 × 建筑维度的平均能耗矩阵"""
+        sql = """
+            SELECT building_id, region_id, ROUND(AVG(value), 2) AS value
+            FROM energy_record
+            WHERE event_time >= NOW() - INTERVAL :hours HOUR
+            GROUP BY building_id, region_id
+        """
+        rows = self._query(sql, {"hours": hours})
+        return [{
+            "building_id": r["building_id"],
+            "region_id": r["region_id"],
+            "value": float(r["value"]),
+        } for r in rows if r.get("value") is not None]
+
+    # ---------- 分项能耗 ----------
 
     def query_sub_items(self, building_id: str, hours: int = 24):
-        """查询分项能耗（照明/空调/插座）"""
-        if self._is_v3():
-            rows = self._query_v3(f"""
-                SELECT sub_type, SUM(value) AS total
-                FROM electricity_sub
-                WHERE time > now() - interval '{hours} hours'
-                  AND building_id = '{building_id}'
-                GROUP BY sub_type
-            """)
-            return {r["sub_type"]: round(float(r["total"]), 2) for r in rows if r.get("total")}
+        """分项能耗（照明/空调/插座）"""
+        sql = """
+            SELECT sub_type, ROUND(SUM(value), 2) AS total
+            FROM energy_sub_record
+            WHERE event_time >= NOW() - INTERVAL :hours HOUR
+              AND building_id = :building_id
+            GROUP BY sub_type
+        """
+        rows = self._query(sql, {"hours": hours, "building_id": building_id})
+        return {r["sub_type"]: float(r["total"]) for r in rows if r.get("total")}
 
-        flux = f'''
-        from(bucket: "{self.cfg.INFLUXDB_BUCKET}")
-          |> range(start: -{hours}h)
-          |> filter(fn: (r) => r["_measurement"] == "electricity_sub")
-          |> filter(fn: (r) => r["_field"] == "value")
-          |> filter(fn: (r) => r["building_id"] == "{building_id}")
-          |> group(columns: ["sub_type"])
-          |> sum()
-        '''
-        tables = self._v2().query_api().query(flux, org=self.cfg.INFLUXDB_ORG)
-        result = {}
-        for table in tables:
-            for record in table.records:
-                sub = record.values.get("sub_type", "")
-                result[sub] = round(float(record.get_value()), 2)
-        return result
+    # ---------- 历史环比 ----------
 
     def query_historical_comparison(self, building_id: str):
-        """查询历史环比：本周 vs 上周，今日 vs 昨日"""
-        if self._is_v3():
-            rows = self._query_v3(f"""
-                SELECT
-                    date_bin(interval '1 day', time) AS day,
-                    SUM(value) AS total
-                FROM electricity_data
-                WHERE time > now() - interval '14 days'
-                  AND building_id = '{building_id}'
-                GROUP BY 1
-                ORDER BY day
-            """)
-            daily = [{"day": r["day"][:10], "total": round(float(r["total"]), 2)} for r in rows if r.get("total")]
-        else:
-            flux = f'''
-            from(bucket: "{self.cfg.INFLUXDB_BUCKET}")
-              |> range(start: -14d)
-              |> filter(fn: (r) => r["_measurement"] == "electricity_data")
-              |> filter(fn: (r) => r["_field"] == "value")
-              |> filter(fn: (r) => r["building_id"] == "{building_id}")
-              |> aggregateWindow(every: 1d, fn: sum, createEmpty: false)
-            '''
-            tables = self._v2().query_api().query(flux, org=self.cfg.INFLUXDB_ORG)
-            daily = []
-            for table in tables:
-                for record in table.records:
-                    daily.append({
-                        "day": record.get_time().strftime("%Y-%m-%d"),
-                        "total": round(float(record.get_value()), 2),
-                    })
+        """今日/昨日、本周/上周历史环比"""
+        sql = """
+            SELECT
+                DATE(event_time) AS day,
+                ROUND(SUM(value), 2) AS total
+            FROM energy_record
+            WHERE event_time >= NOW() - INTERVAL 14 DAY
+              AND building_id = :building_id
+            GROUP BY day
+            ORDER BY day
+        """
+        rows = self._query(sql, {"building_id": building_id})
+        daily = [{"day": str(r["day"]), "total": float(r["total"])} for r in rows if r.get("total")]
 
         if len(daily) < 2:
             return {"today": 0, "yesterday": 0, "this_week": 0, "last_week": 0, "daily": daily}
 
-        today = daily[-1]["total"] if daily else 0
+        today = daily[-1]["total"]
         yesterday = daily[-2]["total"] if len(daily) >= 2 else 0
         week_size = min(7, len(daily))
         this_week = sum(d["total"] for d in daily[-week_size:])
@@ -274,9 +206,3 @@ class InfluxService:
             "last_week": round(last_week, 2),
             "daily": daily,
         }
-
-    def close(self):
-        if self._v3_client:
-            self._v3_client.close()
-        if self._v2_client:
-            self._v2_client.close()

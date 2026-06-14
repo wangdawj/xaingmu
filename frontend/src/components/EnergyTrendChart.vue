@@ -1,50 +1,32 @@
+<!--
+  能耗趋势图组件
+  ============
+  基于 ECharts 的平滑折线图，展示能耗随时间的变化趋势。
+  使用 useECharts 组合式函数，自动响应 data 变化。
+-->
 <template>
   <div ref="chartRef" class="chart"></div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue'
-import * as echarts from 'echarts'
+import { useECharts } from '../composables/useECharts'
 
 const props = defineProps({
   data: { type: Array, default: () => [] },
-  title: { type: String, default: '全校能耗趋势' },
 })
 
-const chartRef = ref(null)
-let chart = null
-
-function render() {
-  if (!chartRef.value) return
-  if (!chart) chart = echarts.init(chartRef.value)
-
-  const times = props.data.map(d => d.time?.slice(11, 16) || d.time)
-  const values = props.data.map(d => d.value)
-
-  chart.setOption({
-    title: { text: props.title, left: 'center', textStyle: { fontSize: 14 } },
-    tooltip: { trigger: 'axis' },
-    grid: { left: 50, right: 20, top: 50, bottom: 60 },
-    xAxis: { type: 'category', data: times, boundaryGap: false },
-    yAxis: { type: 'value', name: 'kWh' },
-    dataZoom: [
-      { type: 'inside', start: 0, end: 100 },
-      { type: 'slider', start: 0, end: 100, height: 20, bottom: 6 },
-    ],
-    series: [{
-      name: '能耗',
-      type: 'line',
-      smooth: true,
-      areaStyle: { opacity: 0.15 },
-      data: values,
-      itemStyle: { color: '#409EFF' },
-    }],
-  })
-}
-
-watch(() => props.data, render, { deep: true })
-onMounted(() => { render(); window.addEventListener('resize', () => chart?.resize()) })
-onUnmounted(() => { chart?.dispose() })
+// 使用标准图表封装：提取时间轴和数据轴
+const { chartRef } = useECharts(props, (p) => ({
+  xAxis: p.data.map(d => d.time?.slice(11, 16) || d.time),  // 取 HH:mm 作为 X 轴标签
+  series: [{
+    name: '能耗',
+    type: 'line',
+    smooth: true,           // 平滑曲线
+    areaStyle: { opacity: 0.15 },  // 半透明面积填充
+    data: p.data.map(d => d.value),
+    itemStyle: { color: '#409EFF' },
+  }],
+}))
 </script>
 
 <style scoped>

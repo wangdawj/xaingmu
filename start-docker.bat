@@ -1,3 +1,15 @@
+:: =============================================================================
+:: 校园综合能耗监测平台 — Docker 一键部署脚本 (Windows CMD)
+:: =============================================================================
+:: 功能:
+::   1. 检测并启动 Docker Desktop
+::   2. 等待 Docker 引擎就绪
+::   3. 执行 docker compose up -d 启动所有容器
+::
+:: 使用方法: 双击运行，或在命令行中执行 start-docker.bat
+:: 前提条件: Docker Desktop 已安装在 E:\ZhouMIan\docker\
+:: =============================================================================
+
 @echo off
 chcp 65001 >nul
 title 校园能耗监测平台 - Docker 部署
@@ -9,7 +21,8 @@ echo.
 echo 镜像存储位置: E:\ZhouMIan\docker_images\DockerDesktopWSL
 echo.
 
-REM 检查 Docker Desktop 是否已运行
+:: ======================== 步骤 1：检测并启动 Docker Desktop ========================
+REM 检查 Docker Desktop 进程是否已运行
 tasklist /FI "IMAGENAME eq Docker Desktop.exe" 2>NUL | find /I /N "Docker Desktop.exe">NUL
 if "%ERRORLEVEL%"=="0" (
     echo Docker Desktop 已在运行
@@ -19,6 +32,7 @@ if "%ERRORLEVEL%"=="0" (
 echo [1/3] 启动 Docker Desktop...
 start "" "E:\ZhouMIan\docker\Docker Desktop.exe"
 
+:: ======================== 步骤 2：等待 Docker 引擎就绪 ========================
 :check_engine
 echo [2/3] 等待 Docker 引擎就绪（约 1-2 分钟）...
 set /a count=0
@@ -36,6 +50,7 @@ exit /b 1
 :docker_ready
 echo [OK] Docker 引擎已就绪！
 
+:: ======================== 步骤 3：拉取镜像并启动容器 ========================
 echo.
 echo [3/3] 拉取镜像并启动容器...
 echo 首次运行需要下载约 2GB 镜像，请耐心等待...
@@ -52,6 +67,7 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+:: ======================== 启动成功提示 ========================
 echo.
 echo ========================================
 echo   [成功] 所有容器已启动！

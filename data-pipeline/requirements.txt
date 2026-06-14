@@ -1,5 +1,4 @@
 kafka-python==2.0.2
-influxdb-client==1.38.0
 pandas==2.1.4
 numpy==1.26.2
 PyMySQL==1.1.0
